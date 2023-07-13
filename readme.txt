@@ -21,14 +21,10 @@ all the matrix functions in a class.
 Alternatively one can use the ThreadedMatrix.pas file which adds multithreaded
 functionality to the base class.
 
-Also check out
-https://github.com/mikerabat/mrmath
-for a deeper description.
-
 Platforms:
 
 This library was built mainly for the windows platform and is 
-compatible with Delphi2007 and later versions. 
+compatible with Delphi2010 and later versions. 
 
 The main problem for older Delphi version is that the compiler doesn't 
 recognize some of the assembler instructions - the generic Delphi code
@@ -53,6 +49,10 @@ Andrea Mauri - pointing out a few issues with FPC and conditional compilation an
 
 // ###################################################################
 changelog:
+
+Date 11.07.2023
+* Fixed a bad cast in the multithreading scheme
+* Updated TSNE algorithm so it is suited for the multithreaded matrix class.
 
 Date 20.03.2023
 * Fixed a bug in creating a random matrix in the TThreadedMatrix.
