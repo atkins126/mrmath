@@ -87,6 +87,7 @@ type
 
     procedure SetValue(const initVal : double); overload;
     procedure SetValue(const initVal : double; x, y, aWidth, aHeight : NativeInt); overload;  // sets the value in a subsection of the matrix
+    procedure InitRandom(method : TRandomAlgorithm; seed : LongInt);         // sets the matrix to random values between 0 - 1
 
     function SubColMtx( colIdx : TIntegerDynArray ) : TDoubleMatrix; overload;
     function SubRowMtx( rowIdx : TIntegerDynArray ) : TDoubleMatrix; overload;
@@ -104,6 +105,7 @@ type
     // #### Simple matrix utility functions
     function Max : double;
     function Min : double;
+    function Sum : double; overload;
 
     function Abs : TDoubleMatrix;
     procedure AbsInPlace;
@@ -191,7 +193,7 @@ type
 
     function Diff(RowWise : boolean) : TDoubleMatrix;
     procedure DiffInPlace(RowWise : boolean);
-    function Sum(RowWise : boolean) : TDoubleMatrix;
+    function Sum(RowWise : boolean) : TDoubleMatrix; overload;
     procedure SumInPlace(RowWise : boolean); overload;
     procedure SumInPlace(RowWide : boolean; keepMemory : boolean); overload;
     function CumulativeSum(RowWise : boolean) : TDoubleMatrix;
@@ -398,6 +400,7 @@ type
 
     procedure SetValue(const initVal : double); overload;
     procedure SetValue(const initVal : double; x, y, aWidth, aHeight : NativeInt); overload;  // sets the value in a subsection of the matrix
+    procedure InitRandom(method : TRandomAlgorithm; seed : LongInt);
 
     function SubColMtx( colIdx : TIntegerDynArray ) : TDoubleMatrix; overload;
     function SubRowMtx( rowIdx : TIntegerDynArray ) : TDoubleMatrix; overload;
@@ -414,6 +417,7 @@ type
     // #### Simple matrix utility functions
     function Max : double;
     function Min : double;
+    function Sum : double; overload;
 
     function Abs : TDoubleMatrix;
     procedure AbsInPlace;
@@ -497,7 +501,7 @@ type
 
     function Diff(RowWise : boolean) : TDoubleMatrix;
     procedure DiffInPlace(RowWise : boolean);
-    function Sum(RowWise : boolean) : TDoubleMatrix;
+    function Sum(RowWise : boolean) : TDoubleMatrix; overload;
     procedure SumInPlace(RowWise : boolean); overload;
     procedure SumInPlace(RowWise : boolean; keepMemory : boolean); overload;
     function CumulativeSum(RowWise : boolean) : TDoubleMatrix;
@@ -611,6 +615,7 @@ type
 
     function Clone : TDoubleMatrix;
 
+    constructor Create(aWidth, aHeight : integer; NoLineWidthGap : boolean); overload;
     constructor Create; overload;
     constructor CreateVec( aLen : integer; const initVal : double = 0 );
     constructor Create(aWidth, aHeight : integer; const initVal : double = 0); overload;
@@ -1013,11 +1018,7 @@ begin
 
      SetWidthHeight(aWidth, aHeight);
 
-     fObj := TRandomGenerator.Create;
-     TRandomGenerator(fObj).RandMethod := method;
-     TRandomGenerator(fObj).Init(seed);
-     ElementwiseFuncInPlace({$IFDEF FPC}@{$ENDIF}MtxRandWithEng);
-     FreeAndNil(fObj);
+     InitRandom(method, seed);
 end;
 
 constructor TDoubleMatrix.CreateLinSpace(aVecLen: integer; const StartVal,
@@ -1063,7 +1064,21 @@ begin
      MatrixCopy(StartElement, LineWidth, @Mtx[0], W*sizeof(double), W, H);
 end;
 
-constructor TDoubleMatrix.CreateCpy(aWidth, aHeight : integer; data : PDouble; aLineWidth : integer); 
+constructor TDoubleMatrix.Create(aWidth, aHeight: integer;
+  NoLineWidthGap: boolean);
+begin
+     CheckAndRaiseError((aWidth > 0) and (aHeight > 0), 'Dimension error');
+
+     inherited Create;
+
+     SetWidthHeight(aWidth, aHeight);
+
+     // just shorten the linewidth -> so we get continous element access
+     if NoLineWidthGap then
+        fLineWidth := aWidth*SizeOf(double);
+end;
+
+constructor TDoubleMatrix.CreateCpy(aWidth, aHeight : integer; data : PDouble; aLineWidth : integer);
 begin
      CheckAndRaiseError((aWidth*aHeight >= 0) and (aLineWidth >= aWidth*sizeof(double)), 'Dimension error');
      
@@ -2581,6 +2596,15 @@ begin
 end;
 
 
+procedure TDoubleMatrix.InitRandom(method : TRandomAlgorithm; seed : LongInt);
+begin
+     fObj := TRandomGenerator.Create;
+     TRandomGenerator(fObj).RandMethod := method;
+     TRandomGenerator(fObj).Init(seed);
+     MatrixFunc(StartElement, LineWidth, fSubWidth, fSubHeight, {$IFDEF FPC}@{$ENDIF}MtxRandWithEng);
+     FreeAndNil(fObj);
+end;
+
 procedure TDoubleMatrix.InternalSetWidthHeight(const aWidth, aHeight: integer; AssignMem : boolean);
 begin
      CheckAndRaiseError((aWidth > 0) and (aHeight > 0), 'Dimension error');
@@ -2804,6 +2828,13 @@ begin
 
           MatrixSum(Result.StartElement, Result.LineWidth, StartElement, LineWidth, fSubWidth, fSubHeight, RowWise);
      end;
+end;
+
+function TDoubleMatrix.Sum: double;
+begin
+     CheckAndRaiseError((Width > 0) and (Height > 0), 'No data assigned');
+
+     Result := MatrixSum(StartElement, LineWidth, width, height);
 end;
 
 procedure TDoubleMatrix.SumInPlace(RowWise, keepMemory: boolean);

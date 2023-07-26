@@ -119,6 +119,10 @@ function GenericMtxMin(mt : PDouble; width, height : NativeInt; const LineWidth 
 function GenericMtxAbsMax(mt : PDouble; width, height : NativeInt; const LineWidth : NativeInt) : double;
 function GenericMtxAbsMin(mt : PDouble; width, height : NativeInt; const LineWidth : NativeInt) : double;
 
+// applies dest^ := max(dest^, maxVal) over all elements
+procedure GenericMtxMaxVal(dest : PDouble; const LineWidth : NativeInt; width, height : NativeInt; maxVal : double);
+procedure GenericMtxMinVal(dest : PDouble; const LineWidth : NativeInt; width, height : NativeInt; minVal : double);
+
 // matrix max and min of an upper or lower diagonal matrix
 function GenericMtxMaxUpper( mt : PDouble; N : NativeInt; const LineWidth : NativeInt ) : double;
 function GenericMtxMinUpper( mt : PDouble; N : NativeInt; const LineWidth : NativeInt ) : double;
@@ -138,6 +142,7 @@ procedure GenericMtxNormalize(var dest : Array of double; const Src : Array of d
 procedure GenericMtxMean(dest : PDouble; destLineWidth : NativeInt; Src : PDouble; srcLineWidth : NativeInt; width, height : NativeInt; RowWise : boolean);
 procedure GenericMtxVar(dest : PDouble; destLineWidth : NativeInt; Src : PDouble; srcLineWidth : NativeInt; width, height : NativeInt; RowWise : boolean; unbiased : boolean);
 procedure GenericMtxSum(dest : PDouble; destLineWidth : NativeInt; Src : PDouble; srcLineWidth : NativeInt; width, height : NativeInt; RowWise : boolean);
+function GenericMtxSumSum(Src : PDouble; srcLineWidth : NativeInt; width, height : NativeInt) : double;
 
 // Calculate the mean and variance at the same time -> dest is at least a 2xheight matrix
 procedure GenericMtxMeanVar(dest : PDouble; destLineWidth : NativeInt; Src : PDouble; srcLineWidth : NativeInt; width, height : NativeInt; RowWise : boolean; unbiased : boolean);
@@ -169,6 +174,12 @@ procedure GenericMtxFunc(dest : PDouble; const destLineWidth : NativeInt; width,
 procedure GenericMtxFunc(dest : PDouble; const destLineWidth : NativeInt; width, height : NativeInt; func : TMatrixMtxRefFunc); overload;
 procedure GenericMtxFunc(dest : PDouble; const destLineWidth : NativeInt; width, height : NativeInt; func : TMatrixMtxRefObjFunc); overload;
 
+// apply a function to a part of a matrix (startx to startx + width -1, starty to starty + height - 1)
+procedure GenericSubMtxFunc(dest : PDouble; const destLineWidth : NativeInt; startx, starty, width, height : NativeInt; func : TMatrixFunc); overload;
+procedure GenericSubMtxFunc(dest : PDouble; const destLineWidth : NativeInt; startx, starty, width, height : NativeInt; func : TMatrixObjFunc); overload;
+procedure GenericSubMtxFunc(dest : PDouble; const destLineWidth : NativeInt; startx, starty, width, height : NativeInt; func : TMatrixMtxRefFunc); overload;
+procedure GenericSubMtxFunc(dest : PDouble; const destLineWidth : NativeInt; startx, starty, width, height : NativeInt; func : TMatrixMtxRefObjFunc); overload;
+
 {$IFDEF FPC}
    {.$DEFINE ANONMETHODS}
 {$ELSE}
@@ -180,6 +191,9 @@ procedure GenericMtxFunc(dest : PDouble; const destLineWidth : NativeInt; width,
 {$IFDEF ANONMETHODS}
 procedure GenericMtxFunc(dest : PDouble; const destLineWidth : NativeInt; width, height : NativeInt; func : TMatrixFuncRef); overload;
 procedure GenericMtxFunc(dest : PDouble; const destLineWidth : NativeInt; width, height : NativeInt; func : TMatrixMtxRefFuncRef); overload;
+
+procedure GenericSubMtxFunc(dest : PDouble; const destLineWidth : NativeInt; startX, startY, width, height : NativeInt; func : TMatrixFuncRef); overload;
+procedure GenericSubMtxFunc(dest : PDouble; const destLineWidth : NativeInt; startX, startY, width, height : NativeInt; func : TMatrixMtxRefFuncRef); overload;
 {$ENDIF}
 
 // ###########################################
@@ -754,6 +768,26 @@ begin
      end;
 end;
 
+function GenericMtxSumSum(Src : PDouble; srcLineWidth : NativeInt; width, height : NativeInt) : double;
+var x, y : NativeInt;
+    pVal2 : PConstDoubleArr;
+    lineVal : double;
+begin
+     assert((Width >= 0) and (Height >= 0), 'No data assigned');
+     Result := 0;
+     for y := 0 to Height - 1 do
+     begin
+          pVal2 := PConstDoubleArr(src);
+          lineVal := 0;
+          for x := 0 to Width - 1 do
+              lineVal := lineVal + pVal2^[x];
+
+          Result := Result + lineVal;
+
+          inc(PByte(src), srcLineWidth);
+     end;
+end;
+
 procedure GenericMtxCumulativeSum(dest : PDouble; destLineWidth : NativeInt; Src : PDouble; srcLineWidth : NativeInt; width, height : NativeInt; RowWise : boolean);
 var val : double;
     x, y : NativeInt;
@@ -1229,6 +1263,41 @@ begin
           inc(PByte(pMt), LineWidth);
      end;
 end;
+
+procedure GenericMtxMaxVal(dest : PDouble; const LineWidth : NativeInt; width, height : NativeInt; maxVal : double);
+var x, y : NativeInt;
+    pLine : PConstDoubleArr;
+begin
+     assert((width > 0) and (height > 0) and (width*sizeof(double) <= LineWidth), 'Dimension error');
+
+     pLine := PConstDoubleArr(dest);
+     for y := 0 to height - 1 do
+     begin
+          for x := 0 to width - 1 do
+              if pLine^[x] < maxVal then
+                 pLine^[x] := maxVal;
+
+          inc(PByte(pLine), LineWidth);
+     end;
+end;
+
+procedure GenericMtxMinVal(dest : PDouble; const LineWidth : NativeInt; width, height : NativeInt; minVal : double);
+var x, y : NativeInt;
+    pLine : PConstDoubleArr;
+begin
+     assert((width > 0) and (height > 0) and (width*sizeof(double) <= LineWidth), 'Dimension error');
+
+     pLine := PConstDoubleArr(dest);
+     for y := 0 to height - 1 do
+     begin
+          for x := 0 to width - 1 do
+              if pLine^[x] > minVal then
+                 pLine^[x] := minVal;
+
+          inc(PByte(pLine), LineWidth);
+     end;
+end;
+
 
 procedure GenericMtxAdd(dest : PDouble; destLineWidth : NativeInt; mt1, mt2 : PDouble; width : NativeInt; height : NativeInt; LineWidth1, LineWidth2 : NativeInt);
 var x, y : NativeInt;
@@ -2271,6 +2340,81 @@ begin
      end;
 end;
 
+procedure GenericSubMtxFunc(dest : PDouble; const destLineWidth : NativeInt; startX, startY, width, height : NativeInt; func : TMatrixFunc);
+var x, y : NativeInt;
+    pLine : PConstDoubleArr;
+begin
+     assert((width > 0) and (height > 0), 'Dimension Error');
+     assert(width*sizeof(double) <= destLineWidth, 'Dimension Error');
+
+     inc(PByte(dest), startY*destLineWidth);
+     for y := startY to startY + Height - 1 do
+     begin
+          pLine := PConstDoubleArr(dest);
+          for x := startX to startX + width - 1 do
+              func(pLine^[x]);
+          inc(PByte(dest), destLineWidth);
+     end;
+end;
+
+procedure GenericSubMtxFunc(dest : PDouble; const destLineWidth : NativeInt; startX, startY, width, height : NativeInt; func : TMatrixObjFunc);
+var x, y : NativeInt;
+    pLine : PConstDoubleArr;
+begin
+     assert((width > 0) and (height > 0), 'Dimension Error');
+     assert((startx + width)*sizeof(double) <= destLineWidth, 'Dimension Error');
+     assert((startx >= 0) and (startY >= 0), 'Dimension Error');
+
+     inc(PByte(dest), startY*destLineWidth);
+     for y := startY to startY + Height - 1 do
+     begin
+          pLine := PConstDoubleArr(dest);
+          for x := startX to startX + width - 1 do
+              func(pLine^[x]);
+          inc(PByte(dest), destLineWidth);
+     end;
+end;
+
+procedure GenericSubMtxFunc(dest : PDouble; const destLineWidth : NativeInt; startX, startY, width, height : NativeInt; func : TMatrixMtxRefFunc);
+var x, y : NativeInt;
+    pLine : PConstDoubleArr;
+    pDest : PDouble;
+begin
+     assert((width > 0) and (height > 0), 'Dimension Error');
+     assert((startx + width)*sizeof(double) <= destLineWidth, 'Dimension Error');
+     assert((startx >= 0) and (startY >= 0), 'Dimension Error');
+
+     pDest := dest;
+     inc(PByte(pDest), starty*destLineWidth);
+     for y := startY to startY + Height - 1 do
+     begin
+          pLine := PConstDoubleArr(pdest);
+          for x := startX to startX + width - 1 do
+              func(pLine^[x], dest, destLineWidth, x, y);
+          inc(PByte(pdest), destLineWidth);
+     end;
+end;
+
+procedure GenericSubMtxFunc(dest : PDouble; const destLineWidth : NativeInt; startX, startY, width, height : NativeInt; func : TMatrixMtxRefObjFunc);
+var x, y : NativeInt;
+    pLine : PConstDoubleArr;
+    pDest : PDouble;
+begin
+     assert((width > 0) and (height > 0), 'Dimension Error');
+     assert((startx + width)*sizeof(double) <= destLineWidth, 'Dimension Error');
+     assert((startx >= 0) and (startY >= 0), 'Dimension Error');
+
+     pDest := dest;
+     inc(PByte(pDest), starty*destLineWidth);
+     for y := startY to startY + Height - 1 do
+     begin
+          pLine := PConstDoubleArr(pdest);
+          for x := startX to startX + width - 1 do
+              func(pLine^[x], dest, destLineWidth, x, y);
+          inc(PByte(pdest), destLineWidth);
+     end;
+end;
+
 {$IFDEF ANONMETHODS}
 
 procedure GenericMtxFunc(dest : PDouble; const destLineWidth : NativeInt; width, height : NativeInt; func : TMatrixFuncRef);
@@ -2302,6 +2446,44 @@ begin
      begin
           pLine := PConstDoubleArr(pdest);
           for x := 0 to width - 1 do
+              func(pLine^[x], dest, destLineWidth, x, y);
+          inc(PByte(pdest), destLineWidth);
+     end;
+end;
+
+procedure GenericSubMtxFunc(dest : PDouble; const destLineWidth : NativeInt; startX, startY, width, height : NativeInt; func : TMatrixFuncRef); overload;
+var x, y : NativeInt;
+    pLine : PConstDoubleArr;
+begin
+     assert((width > 0) and (height > 0), 'Dimension Error');
+     assert((startx + width)*sizeof(double) <= destLineWidth, 'Dimension Error');
+     assert((startx >= 0) and (startY >= 0), 'Dimension Error');
+
+     inc(PByte(dest), startY*destLineWidth);
+     for y := startY to startY + Height - 1 do
+     begin
+          pLine := PConstDoubleArr(dest);
+          for x := startX to startX + width - 1 do
+              func(pLine^[x]);
+          inc(PByte(dest), destLineWidth);
+     end;
+end;
+
+procedure GenericSubMtxFunc(dest : PDouble; const destLineWidth : NativeInt; startX, startY, width, height : NativeInt; func : TMatrixMtxRefFuncRef); overload;
+var x, y : NativeInt;
+    pLine : PConstDoubleArr;
+    pDest : PDouble;
+begin
+     assert((width > 0) and (height > 0), 'Dimension Error');
+     assert((startx + width)*sizeof(double) <= destLineWidth, 'Dimension Error');
+     assert((startx >= 0) and (startY >= 0), 'Dimension Error');
+
+     pDest := dest;
+     inc(PByte(pDest), starty*destLineWidth);
+     for y := startY to startY + Height - 1 do
+     begin
+          pLine := PConstDoubleArr(pdest);
+          for x := startX to startX + width - 1 do
               func(pLine^[x], dest, destLineWidth, x, y);
           inc(PByte(pdest), destLineWidth);
      end;
@@ -3380,3 +3562,4 @@ end;
 
 
 end.
+

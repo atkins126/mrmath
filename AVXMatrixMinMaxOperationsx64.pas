@@ -29,6 +29,13 @@ function AVXMatrixMaxUnAligned(mt : PDouble; width, height : NativeInt; const Li
 function AVXMatrixMinAligned(mt : PDouble; width, height : NativeInt; const LineWidth : NativeInt) : double; {$IFDEF FPC}assembler;{$ENDIF}
 function AVXMatrixMinUnAligned(mt : PDouble; width, height : NativeInt; const LineWidth : NativeInt) : double; {$IFDEF FPC}assembler;{$ENDIF}
 
+// in matrix max/min
+procedure AVXMatrixMinValUnAligned( dest : PDouble; const LineWidth : NativeInt; width, height : NativeInt; {$IFDEF UNIX}unixMinVal : double {$ELSE} minVal : double {$ENDIF} ); {$IFDEF FPC} assembler; {$ELSE} register; {$ENDIF}
+procedure AVXMatrixMaxValUnAligned( dest : PDouble; const LineWidth : NativeInt; width, height : NativeInt; {$IFDEF UNIX}unixMaxVal : double {$ELSE} maxVal : double {$ENDIF} ); {$IFDEF FPC} assembler; {$ELSE} register; {$ENDIF}
+
+procedure AVXMatrixMinValAligned( dest : PDouble; const LineWidth : NativeInt; width, height : NativeInt; {$IFDEF UNIX}unixMinVal : double {$ELSE} minVal : double {$ENDIF} ); {$IFDEF FPC} assembler; {$ELSE} register; {$ENDIF}
+procedure AVXMatrixMaxValAligned( dest : PDouble; const LineWidth : NativeInt; width, height : NativeInt; {$IFDEF UNIX}unixMaxVal : double {$ELSE} maxVal : double {$ENDIF} ); {$IFDEF FPC} assembler; {$ELSE} register; {$ENDIF}
+
 {$ENDIF}
 
 implementation
@@ -421,6 +428,366 @@ asm
    // epilog - cleanup stack
    {$IFDEF AVXSUP}vmovupd xmm4, [rsp + $00];                          {$ELSE}db $C5,$F9,$10,$24,$24;{$ENDIF} 
    add rsp, $10;
+   {$IFDEF AVXSUP}vzeroupper;                                         {$ELSE}db $C5,$F8,$77;{$ENDIF} 
+end;
+
+procedure AVXMatrixMinValUnAligned( dest : PDouble; const LineWidth : NativeInt; width, height : NativeInt;{$IFDEF UNIX}unixMinVal : double {$ELSE} minVal : double {$ENDIF}); {$IFDEF FPC} assembler; {$ELSE} register; {$ENDIF}
+// rcx = dest; rdx = LineWidth, r8 = Width, r9 = height; xmm0 = unixMinVal
+{$IFDEF UNIX}
+var minVal : double;
+{$ENDIF}
+asm
+   {$IFDEF UNIX}
+   // Linux uses a diffrent ABI -> copy over the registers so they meet with winABI
+   // (note that the 5th and 6th parameter are are on the stack)
+   // The parameters are passed in the following order:
+   // RDI, RSI, RDX, RCX -> mov to RCX, RDX, R8, R9
+   mov r8, rdx;
+   mov r9, rcx;
+   mov rcx, rdi;
+   mov rdx, rsi;
+   movsd minVal, xmm0;
+   {$ENDIF}
+
+   imul r8, -8;
+
+   // helper registers for the dest pointer
+   sub rcx, r8;
+
+   lea rax, minVal;
+   {$IFDEF AVXSUP}vbroadcastsd ymm0, [rax];                           {$ELSE}db $C4,$E2,$7D,$19,$00;{$ENDIF} 
+
+   // for y := 0 to height - 1:
+   @@addforyloop:
+       // for x := 0 to w - 1;
+       // prepare for reverse loop
+       mov rax, r8;
+       @addforxloop:
+           add rax, 128;
+           jg @loopEnd;
+
+           // prefetch data...
+           //prefetchw [rcx + rax];
+
+           // Abs:
+           {$IFDEF AVXSUP}vmovupd ymm1, [rcx + rax - 128];            {$ELSE}db $C5,$FD,$10,$4C,$01,$80;{$ENDIF} 
+           {$IFDEF AVXSUP}vminpd ymm1, ymm1, ymm0;                    {$ELSE}db $C5,$F5,$5D,$C8;{$ENDIF} 
+           {$IFDEF AVXSUP}vmovupd [rcx + rax - 128], ymm1;            {$ELSE}db $C5,$FD,$11,$4C,$01,$80;{$ENDIF} 
+
+           {$IFDEF AVXSUP}vmovupd ymm2, [rcx + rax - 96];             {$ELSE}db $C5,$FD,$10,$54,$01,$A0;{$ENDIF} 
+           {$IFDEF AVXSUP}vminpd ymm2, ymm2, ymm0;                    {$ELSE}db $C5,$ED,$5D,$D0;{$ENDIF} 
+           {$IFDEF AVXSUP}vmovupd [rcx + rax - 96], ymm2;             {$ELSE}db $C5,$FD,$11,$54,$01,$A0;{$ENDIF} 
+
+           {$IFDEF AVXSUP}vmovupd ymm3, [rcx + rax - 64];             {$ELSE}db $C5,$FD,$10,$5C,$01,$C0;{$ENDIF} 
+           {$IFDEF AVXSUP}vminpd ymm3, ymm3, ymm0;                    {$ELSE}db $C5,$E5,$5D,$D8;{$ENDIF} 
+           {$IFDEF AVXSUP}vmovupd [rcx + rax - 64], ymm3;             {$ELSE}db $C5,$FD,$11,$5C,$01,$C0;{$ENDIF} 
+
+           {$IFDEF AVXSUP}vmovupd ymm4, [rcx + rax - 32];             {$ELSE}db $C5,$FD,$10,$64,$01,$E0;{$ENDIF} 
+           {$IFDEF AVXSUP}vminpd ymm4, ymm4, ymm0;                    {$ELSE}db $C5,$DD,$5D,$E0;{$ENDIF} 
+           {$IFDEF AVXSUP}vmovupd [rcx + rax - 32], ymm4;             {$ELSE}db $C5,$FD,$11,$64,$01,$E0;{$ENDIF} 
+       jmp @addforxloop
+
+       @loopEnd:
+
+       sub rax, 128;
+
+       jz @nextLine;
+
+       @addforxloop2:
+           add rax, 16;
+           jg @loopEnd2;
+
+           {$IFDEF AVXSUP}vmovupd xmm1, [rcx + rax - 16];             {$ELSE}db $C5,$F9,$10,$4C,$01,$F0;{$ENDIF} 
+           {$IFDEF AVXSUP}vminpd xmm1, xmm1, xmm0;                    {$ELSE}db $C5,$F1,$5D,$C8;{$ENDIF} 
+           {$IFDEF AVXSUP}vmovupd [rcx + rax - 16], xmm1;             {$ELSE}db $C5,$F9,$11,$4C,$01,$F0;{$ENDIF} 
+       jmp @addforxloop2;
+
+       @loopEnd2:
+
+       sub rax, 16;
+       jz @nextLine;
+
+       {$IFDEF AVXSUP}vmovsd xmm1, [rcx + rax];                       {$ELSE}db $C5,$FB,$10,$0C,$01;{$ENDIF} 
+       {$IFDEF AVXSUP}vminsd xmm1, xmm1, xmm0;                        {$ELSE}db $C5,$F3,$5D,$C8;{$ENDIF} 
+       {$IFDEF AVXSUP}vmovsd [rcx + rax], xmm1;                       {$ELSE}db $C5,$FB,$11,$0C,$01;{$ENDIF} 
+
+       @nextLine:
+
+       // next line:
+       add rcx, rdx;
+
+   // loop y end
+   dec r9;
+   jnz @@addforyloop;
+
+   {$IFDEF AVXSUP}vzeroupper;                                         {$ELSE}db $C5,$F8,$77;{$ENDIF} 
+end;
+
+
+procedure AVXMatrixMaxValUnAligned( dest : PDouble; const LineWidth : NativeInt; width, height : NativeInt; {$IFDEF UNIX}unixMaxVal : double {$ELSE} maxVal : double {$ENDIF} ); {$IFDEF FPC} assembler; {$ELSE} register; {$ENDIF}
+// rcx = dest; rdx = LineWidth, r8 = Width, r9 = height, unix: xmm0 = unixmaxval
+{$IFDEF UNIX}
+var maxVal : double;
+{$ENDIF}
+asm
+   {$IFDEF UNIX}
+   // Linux uses a diffrent ABI -> copy over the registers so they meet with winABI
+   // (note that the 5th and 6th parameter are are on the stack)
+   // The parameters are passed in the following order:
+   // RDI, RSI, RDX, RCX -> mov to RCX, RDX, R8, R9
+   mov r8, rdx;
+   mov r9, rcx;
+   mov rcx, rdi;
+   mov rdx, rsi;
+   movsd maxVal, xmm0;
+   {$ENDIF}
+
+   imul r8, -8;
+
+   // helper registers for the dest pointer
+   sub rcx, r8;
+
+   lea rax, maxVal;
+   {$IFDEF AVXSUP}vbroadcastsd ymm0, [rax];                           {$ELSE}db $C4,$E2,$7D,$19,$00;{$ENDIF} 
+
+   // for y := 0 to height - 1:
+   @@addforyloop:
+       // for x := 0 to w - 1;
+       // prepare for reverse loop
+       mov rax, r8;
+       @addforxloop:
+           add rax, 128;
+           jg @loopEnd;
+
+           // prefetch data...
+           //prefetchw [rcx + rax];
+
+           // Abs:
+           {$IFDEF AVXSUP}vmovupd ymm1, [rcx + rax - 128];            {$ELSE}db $C5,$FD,$10,$4C,$01,$80;{$ENDIF} 
+           {$IFDEF AVXSUP}vmaxpd ymm1, ymm1, ymm0;                    {$ELSE}db $C5,$F5,$5F,$C8;{$ENDIF} 
+           {$IFDEF AVXSUP}vmovupd [rcx + rax - 128], ymm1;            {$ELSE}db $C5,$FD,$11,$4C,$01,$80;{$ENDIF} 
+
+           {$IFDEF AVXSUP}vmovupd ymm2, [rcx + rax - 96];             {$ELSE}db $C5,$FD,$10,$54,$01,$A0;{$ENDIF} 
+           {$IFDEF AVXSUP}vmaxpd ymm2, ymm2, ymm0;                    {$ELSE}db $C5,$ED,$5F,$D0;{$ENDIF} 
+           {$IFDEF AVXSUP}vmovupd [rcx + rax - 96], ymm2;             {$ELSE}db $C5,$FD,$11,$54,$01,$A0;{$ENDIF} 
+
+           {$IFDEF AVXSUP}vmovupd ymm3, [rcx + rax - 64];             {$ELSE}db $C5,$FD,$10,$5C,$01,$C0;{$ENDIF} 
+           {$IFDEF AVXSUP}vmaxpd ymm3, ymm3, ymm0;                    {$ELSE}db $C5,$E5,$5F,$D8;{$ENDIF} 
+           {$IFDEF AVXSUP}vmovupd [rcx + rax - 64], ymm3;             {$ELSE}db $C5,$FD,$11,$5C,$01,$C0;{$ENDIF} 
+
+           {$IFDEF AVXSUP}vmovupd ymm4, [rcx + rax - 32];             {$ELSE}db $C5,$FD,$10,$64,$01,$E0;{$ENDIF} 
+           {$IFDEF AVXSUP}vmaxpd ymm4, ymm4, ymm0;                    {$ELSE}db $C5,$DD,$5F,$E0;{$ENDIF} 
+           {$IFDEF AVXSUP}vmovupd [rcx + rax - 32], ymm4;             {$ELSE}db $C5,$FD,$11,$64,$01,$E0;{$ENDIF} 
+       jmp @addforxloop
+
+       @loopEnd:
+
+       sub rax, 128;
+
+       jz @nextLine;
+
+       @addforxloop2:
+           add rax, 16;
+           jg @loopEnd2;
+
+           {$IFDEF AVXSUP}vmovupd xmm1, [rcx + rax - 16];             {$ELSE}db $C5,$F9,$10,$4C,$01,$F0;{$ENDIF} 
+           {$IFDEF AVXSUP}vmaxpd xmm1, xmm1, xmm0;                    {$ELSE}db $C5,$F1,$5F,$C8;{$ENDIF} 
+           {$IFDEF AVXSUP}vmovupd [rcx + rax - 16], xmm1;             {$ELSE}db $C5,$F9,$11,$4C,$01,$F0;{$ENDIF} 
+       jmp @addforxloop2;
+
+       @loopEnd2:
+
+       sub rax, 16;
+       jz @nextLine;
+
+       {$IFDEF AVXSUP}vmovsd xmm1, [rcx + rax];                       {$ELSE}db $C5,$FB,$10,$0C,$01;{$ENDIF} 
+       {$IFDEF AVXSUP}vmaxsd xmm1, xmm1, xmm0;                        {$ELSE}db $C5,$F3,$5F,$C8;{$ENDIF} 
+       {$IFDEF AVXSUP}vmovsd [rcx + rax], xmm1;                       {$ELSE}db $C5,$FB,$11,$0C,$01;{$ENDIF} 
+
+       @nextLine:
+
+       // next line:
+       add rcx, rdx;
+
+   // loop y end
+   dec r9;
+   jnz @@addforyloop;
+
+   {$IFDEF AVXSUP}vzeroupper;                                         {$ELSE}db $C5,$F8,$77;{$ENDIF} 
+end;
+
+
+procedure AVXMatrixMinValAligned( dest : PDouble; const LineWidth : NativeInt; width, height : NativeInt; {$IFDEF UNIX}unixMinVal : double {$ELSE} minVal : double {$ENDIF} ); {$IFDEF FPC} assembler; {$ELSE} register; {$ENDIF}
+// rcx = dest; rdx = LineWidth, r8 = Width, r9 = height
+{$IFDEF UNIX}
+var minVal : double;
+{$ENDIF}
+asm
+   {$IFDEF UNIX}
+   // Linux uses a diffrent ABI -> copy over the registers so they meet with winABI
+   // (note that the 5th and 6th parameter are are on the stack)
+   // The parameters are passed in the following order:
+   // RDI, RSI, RDX, RCX -> mov to RCX, RDX, R8, R9
+   mov r8, rdx;
+   mov r9, rcx;
+   mov rcx, rdi;
+   mov rdx, rsi;
+   movsd minVal, xmm0;
+   {$ENDIF}
+
+   imul r8, -8;
+
+   // helper registers for the dest pointer
+   sub rcx, r8;
+
+   lea rax, minVal;
+   {$IFDEF AVXSUP}vbroadcastsd ymm0, [rax];                           {$ELSE}db $C4,$E2,$7D,$19,$00;{$ENDIF} 
+
+   // for y := 0 to height - 1:
+   @@addforyloop:
+       // for x := 0 to w - 1;
+       // prepare for reverse loop
+       mov rax, r8;
+       @addforxloop:
+           add rax, 128;
+           jg @loopEnd;
+
+           // prefetch data...
+           //prefetchw [rcx + rax];
+
+           // Abs:
+           {$IFDEF AVXSUP}vminpd ymm1, ymm0, [rcx + rax - 128];       {$ELSE}db $C5,$FD,$5D,$4C,$01,$80;{$ENDIF} 
+           {$IFDEF AVXSUP}vmovapd [rcx + rax - 128], ymm1;            {$ELSE}db $C5,$FD,$29,$4C,$01,$80;{$ENDIF} 
+
+           {$IFDEF AVXSUP}vminpd ymm2, ymm0, [rcx + rax - 96];        {$ELSE}db $C5,$FD,$5D,$54,$01,$A0;{$ENDIF} 
+           {$IFDEF AVXSUP}vmovapd [rcx + rax - 96], ymm2;             {$ELSE}db $C5,$FD,$29,$54,$01,$A0;{$ENDIF} 
+
+           {$IFDEF AVXSUP}vminpd ymm3, ymm0, [rcx + rax - 64];        {$ELSE}db $C5,$FD,$5D,$5C,$01,$C0;{$ENDIF} 
+           {$IFDEF AVXSUP}vmovapd [rcx + rax - 64], ymm3;             {$ELSE}db $C5,$FD,$29,$5C,$01,$C0;{$ENDIF} 
+
+           {$IFDEF AVXSUP}vminpd ymm4, ymm0, [rcx + rax - 32];        {$ELSE}db $C5,$FD,$5D,$64,$01,$E0;{$ENDIF} 
+           {$IFDEF AVXSUP}vmovapd [rcx + rax - 32], ymm4;             {$ELSE}db $C5,$FD,$29,$64,$01,$E0;{$ENDIF} 
+       jmp @addforxloop
+
+       @loopEnd:
+
+       sub rax, 128;
+
+       jz @nextLine;
+
+       @addforxloop2:
+           add rax, 16;
+           jg @loopEnd2;
+
+           {$IFDEF AVXSUP}vminpd xmm1, xmm0, [rcx + rax - 16];        {$ELSE}db $C5,$F9,$5D,$4C,$01,$F0;{$ENDIF} 
+           {$IFDEF AVXSUP}vmovapd [rcx + rax - 16], xmm1;             {$ELSE}db $C5,$F9,$29,$4C,$01,$F0;{$ENDIF} 
+       jmp @addforxloop2;
+
+       @loopEnd2:
+
+       sub rax, 16;
+       jz @nextLine;
+
+       {$IFDEF AVXSUP}vmovsd xmm1, [rcx + rax];                       {$ELSE}db $C5,$FB,$10,$0C,$01;{$ENDIF} 
+       {$IFDEF AVXSUP}vminsd xmm1, xmm1, xmm0;                        {$ELSE}db $C5,$F3,$5D,$C8;{$ENDIF} 
+       {$IFDEF AVXSUP}vmovsd [rcx + rax], xmm1;                       {$ELSE}db $C5,$FB,$11,$0C,$01;{$ENDIF} 
+
+       @nextLine:
+
+       // next line:
+       add rcx, rdx;
+
+   // loop y end
+   dec r9;
+   jnz @@addforyloop;
+
+   {$IFDEF AVXSUP}vzeroupper;                                         {$ELSE}db $C5,$F8,$77;{$ENDIF} 
+end;
+
+procedure AVXMatrixMaxValAligned( dest : PDouble; const LineWidth : NativeInt; width, height : NativeInt; {$IFDEF UNIX}unixMaxVal : double {$ELSE} maxVal : double {$ENDIF} ); {$IFDEF FPC} assembler; {$ELSE} register; {$ENDIF}
+// rcx = dest; rdx = LineWidth, r8 = Width, r9 = height
+{$IFDEF UNIX}
+var maxVal : double;
+{$ENDIF}
+asm
+   {$IFDEF UNIX}
+   // Linux uses a diffrent ABI -> copy over the registers so they meet with winABI
+   // (note that the 5th and 6th parameter are are on the stack)
+   // The parameters are passed in the following order:
+   // RDI, RSI, RDX, RCX -> mov to RCX, RDX, R8, R9
+   mov r8, rdx;
+   mov r9, rcx;
+   mov rcx, rdi;
+   mov rdx, rsi;
+   movsd maxVal, xmm0;
+   {$ENDIF}
+
+   imul r8, -8;
+
+   // helper registers for the dest pointer
+   sub rcx, r8;
+
+   lea rax, maxVal;
+   {$IFDEF AVXSUP}vbroadcastsd ymm0, [rax];                           {$ELSE}db $C4,$E2,$7D,$19,$00;{$ENDIF} 
+
+   // for y := 0 to height - 1:
+   @@addforyloop:
+       // for x := 0 to w - 1;
+       // prepare for reverse loop
+       mov rax, r8;
+       @addforxloop:
+           add rax, 128;
+           jg @loopEnd;
+
+           // prefetch data...
+           //prefetchw [rcx + rax];
+
+           // Abs:
+           {$IFDEF AVXSUP}vmaxpd ymm1, ymm0, [rcx + rax - 128];       {$ELSE}db $C5,$FD,$5F,$4C,$01,$80;{$ENDIF} 
+           {$IFDEF AVXSUP}vmovapd [rcx + rax - 128], ymm1;            {$ELSE}db $C5,$FD,$29,$4C,$01,$80;{$ENDIF} 
+
+           {$IFDEF AVXSUP}vmaxpd ymm2, ymm0, [rcx + rax - 96];        {$ELSE}db $C5,$FD,$5F,$54,$01,$A0;{$ENDIF} 
+           {$IFDEF AVXSUP}vmovapd [rcx + rax - 96], ymm2;             {$ELSE}db $C5,$FD,$29,$54,$01,$A0;{$ENDIF} 
+
+           {$IFDEF AVXSUP}vmaxpd ymm3, ymm0, [rcx + rax - 64];        {$ELSE}db $C5,$FD,$5F,$5C,$01,$C0;{$ENDIF} 
+           {$IFDEF AVXSUP}vmovapd [rcx + rax - 64], ymm3;             {$ELSE}db $C5,$FD,$29,$5C,$01,$C0;{$ENDIF} 
+
+           {$IFDEF AVXSUP}vmaxpd ymm4, ymm0, [rcx + rax - 32];        {$ELSE}db $C5,$FD,$5F,$64,$01,$E0;{$ENDIF} 
+           {$IFDEF AVXSUP}vmovapd [rcx + rax - 32], ymm4;             {$ELSE}db $C5,$FD,$29,$64,$01,$E0;{$ENDIF} 
+       jmp @addforxloop
+
+       @loopEnd:
+
+       sub rax, 128;
+
+       jz @nextLine;
+
+       @addforxloop2:
+           add rax, 16;
+           jg @loopEnd2;
+
+           {$IFDEF AVXSUP}vmaxpd xmm1, xmm0, [rcx + rax - 16];        {$ELSE}db $C5,$F9,$5F,$4C,$01,$F0;{$ENDIF} 
+           {$IFDEF AVXSUP}vmovapd [rcx + rax - 16], xmm1;             {$ELSE}db $C5,$F9,$29,$4C,$01,$F0;{$ENDIF} 
+       jmp @addforxloop2;
+
+       @loopEnd2:
+
+       sub rax, 16;
+       jz @nextLine;
+
+       {$IFDEF AVXSUP}vmovsd xmm1, [rcx + rax];                       {$ELSE}db $C5,$FB,$10,$0C,$01;{$ENDIF} 
+       {$IFDEF AVXSUP}vmaxsd xmm1, xmm1, xmm0;                        {$ELSE}db $C5,$F3,$5F,$C8;{$ENDIF} 
+       {$IFDEF AVXSUP}vmovsd [rcx + rax], xmm1;                       {$ELSE}db $C5,$FB,$11,$0C,$01;{$ENDIF} 
+
+       @nextLine:
+
+       // next line:
+       add rcx, rdx;
+
+   // loop y end
+   dec r9;
+   jnz @@addforyloop;
+
    {$IFDEF AVXSUP}vzeroupper;                                         {$ELSE}db $C5,$F8,$77;{$ENDIF} 
 end;
 

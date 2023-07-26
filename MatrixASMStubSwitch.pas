@@ -200,10 +200,15 @@ procedure MatrixTransposeInplace(mt : PDouble; const LineWidth : NativeInt; N : 
 // #### Max/sum mean variance
 // ###########################################
 
-function MatrixMax(mt : PDouble; width, height : NativeInt; const LineWidth : NativeInt) : double;
-function MatrixMin(mt : PDouble; width, height : NativeInt; const LineWidth : NativeInt) : double;
+function MatrixMax(mt : PDouble; width, height : NativeInt; const LineWidth : NativeInt) : double; overload;
+function MatrixMin(mt : PDouble; width, height : NativeInt; const LineWidth : NativeInt) : double; overload;
 function MatrixAbsMax(mt : PDouble; width, height : NativeInt; const LineWidth : NativeInt) : double;
 function MatrixAbsMin(mt : PDouble; width, height : NativeInt; const LineWidth : NativeInt) : double;
+
+// applies dest^ := max(dest^, maxVal) over all elements
+procedure MatrixMax(dest : PDouble; const LineWidth : NativeInt; width, height : NativeInt; maxVal : double); overload;
+procedure MatrixMin(dest : PDouble; const LineWidth : NativeInt; width, height : NativeInt; minVal : double); overload;
+
 
 // min/max of an square upper/lower matrix
 function MatrixMaxUpper( mt : PDouble; N : NativeInt; const LineWidth : NativeInt ) : double;
@@ -249,6 +254,7 @@ function MatrixSum(Src : PDouble; const srcLineWidth : NativeInt; width, height 
 function MatrixSum(const Src : Array of double; width, height : NativeInt; RowWise : boolean) : TDoubleDynArray; overload;
 procedure MatrixSum(dest : PDouble; const destLineWidth : NativeInt; Src : PDouble; const srcLineWidth : NativeInt; width, height : NativeInt; RowWise : boolean); overload;
 procedure MatrixSum(var dest : Array of double; const Src : Array of double; width, height : NativeInt; RowWise : boolean); overload;
+function MatrixSum(src : PDouble; const srcLineWidth : NativeInt; width, height : NativeInt ) : double; overload;
 
 procedure MatrixCumulativeSum(dest : PDouble; const destLineWidth : NativeInt; Src : PDouble; const srcLineWidth : NativeInt; width, height : NativeInt; RowWise : boolean);
 procedure MatrixDiff(dest : PDouble; const destLineWidth : NativeInt; Src : PDouble; const srcLineWidth : NativeInt; width, height : NativeInt; RowWise : boolean);
@@ -266,6 +272,11 @@ procedure MatrixFunc(dest : PDouble; const destLineWidth : NativeInt; width, hei
 procedure MatrixFunc(dest : PDouble; const destLineWidth : NativeInt; width, height : NativeInt; func : TMatrixMtxRefFunc); overload;
 procedure MatrixFunc(dest : PDouble; const destLineWidth : NativeInt; width, height : NativeInt; func : TMatrixMtxRefObjFunc); overload;
 
+procedure SubMatrixFunc(dest : PDouble; const destLineWidth : NativeInt; startx, starty, width, height : NativeInt; func : TMatrixFunc); overload;
+procedure SubMatrixFunc(dest : PDouble; const destLineWidth : NativeInt; startx, starty, width, height : NativeInt; func : TMatrixObjFunc); overload;
+procedure SubMatrixFunc(dest : PDouble; const destLineWidth : NativeInt; startx, starty, width, height : NativeInt; func : TMatrixMtxRefFunc); overload;
+procedure SubMatrixFunc(dest : PDouble; const destLineWidth : NativeInt; startx, starty, width, height : NativeInt; func : TMatrixMtxRefObjFunc); overload;
+
 {$IFDEF FPC}
    {:$DEFINE ANONMETHODS}
 {$ELSE}
@@ -277,6 +288,10 @@ procedure MatrixFunc(dest : PDouble; const destLineWidth : NativeInt; width, hei
 {$IFDEF ANONMETHODS}
 procedure MatrixFunc(dest : PDouble; const destLineWidth : NativeInt; width, height : NativeInt; func : TMatrixFuncRef); overload;
 procedure MatrixFunc(dest : PDouble; const destLineWidth : NativeInt; width, height : NativeInt; func : TMatrixMtxRefFuncRef); overload;
+
+procedure SubMatrixFunc(dest : PDouble; const destLineWidth : NativeInt; startx, starty, width, height : NativeInt; func : TMatrixFuncRef); overload;
+procedure SubMatrixFunc(dest : PDouble; const destLineWidth : NativeInt; startx, starty, width, height : NativeInt; func : TMatrixMtxRefFuncRef); overload;
+
 {$ENDIF}
 
 // matrix rotation stubs
@@ -325,11 +340,13 @@ type
   TMatrixCopyFunc = procedure(dest : PDouble; destLineWidth : NativeInt; Src : PDouble; srcLineWidth : NativeInt; width, height : NativeInt);
   TMatrixInitFunc = procedure(dest : PDouble; destLIneWidth : NativeInt; Width, Height : NativeInt; const value : double );
   TMatrixMinMaxFunc = function(mt : PDouble; width, height : NativeInt; const LineWidth : NativeInt) : double;
+  TMatrixMinMaxMtxFunc = procedure(dest : PDouble; const LineWidth : NativeInt; width, height : NativeInt; maxVal : double);
   TMatrixMinMaxTriaFunc = function(mt : PDouble; N : NativeInt; const LineWidth : NativeInt) : double;
   TMatrixTransposeFunc = procedure(dest : PDouble; const destLineWidth : NativeInt; mt : PDouble; const LineWidth : NativeInt; width : NativeInt; height : NativeInt);
   TMatrixTransposeInplaceFunc = procedure(mt : PDouble; const LineWidth : NativeInt; N : NativeInt);
   TMatrixElemWiseNormFunc = function (dest : PDouble; LineWidth : NativeInt; Width, height : NativeInt; doSqrt : boolean) : double;
   TMatrixNormalizeFunc = procedure(dest : PDouble; destLineWidth : NativeInt; src : PDouble; srcLineWidth : NativeInt; Width, Height : NativeInt; RowWise : Boolean);
+  TMatrixSumSumFunc = function (src : PDouble; srcLineWidth : NativeInt; Width, Height : NativeInt): double;
   TMatrixVarianceFunc = procedure(dest : PDouble; destLineWidth : NativeInt; src : PDouble; srcLineWidth : NativeInt; Width, Height : NativeInt; RowWise : Boolean; unbiased : boolean);
   TMatrixRowSwapFunc = procedure (A, B : PDouble; width : NativeInt);
   TMatrixColSwapFunc = procedure(A, B : PDouble; const LineWidthAB : NativeInt; Height : NativeInt);
@@ -421,6 +438,8 @@ var multFunc : TMatrixMultFunc;
     minFunc : TMatrixMinMaxFunc;
     absMinFunc : TMatrixMinMaxFunc;
     absMaxFunc : TMatrixMinMaxFunc;
+    maxMtxFunc : TMatrixMinMaxMtxFunc;
+    minMtxFunc : TMatrixMinMaxMtxFunc;
     minLowerFunc : TMatrixMinMaxTriaFunc;
     maxLowerFunc : TMatrixMinMaxTriaFunc;
     minUpperFunc : TMatrixMinMaxTriaFunc;
@@ -438,6 +457,7 @@ var multFunc : TMatrixMultFunc;
     matrixSortFunc : TMatrixSortFunc;
     matrixVarFunc : TMatrixVarianceFunc;
     matrixSumFunc : TMatrixNormalizeFunc;
+    matrixSumSumFunc : TMatrixSumSumFunc;
     matrixMeanVarFunc : TMatrixVarianceFunc;
     matrixCumulativeSumFunc : TMatrixNormalizeFunc;
     matrixDiffFunc : TMatrixNormalizeFunc;
@@ -714,11 +734,8 @@ begin
 end;
 
 procedure MatrixMult(dest : PDouble; const destLineWidth : NativeInt; mt1, mt2 : PDouble; width1 : NativeInt; height1 : NativeInt; width2 : NativeInt; height2 : NativeInt; const LineWidth1, LineWidth2 : NativeInt);
-var multBlockSize : NativeInt;
 begin
-     multBlockSize := BlockedMatrixMultSize*BlockedMatrixMultSize;
-     if ((width1 >= BlockedMatrixMultSize) and (height1 >= BlockedMatrixMultSize) and (height2 >= BlockedMatrixMultSize)) or
-        (width1*height1 >= multBlockSize) or (width2*Height2 >= multBlockSize)
+     if ((width1 >= BlockedMatrixMultSize) and (height1 >= BlockedMatrixMultSize) and (height2 >= BlockedMatrixMultSize)) and (width2 >= BlockedMatrixMultSize)
      then
          blockedMultFunc(dest, destLineWidth, mt1, mt2, width1, height1, width2, height2, LineWidth1, LineWidth2, BlockMatrixCacheSize, doNone, nil)
      else
@@ -1180,6 +1197,17 @@ begin
          Result := absMinLowerFunc(mt, N, LineWidth );
 end;
 
+procedure MatrixMax(dest : PDouble; const LineWidth : NativeInt; width, height : NativeInt; maxVal : double); overload;
+begin
+     assert((width >= 0) and (height >= 0) and (LineWidth >= width*sizeof(double)), 'Dimension error');
+     maxMtxFunc(dest, LineWidth, width, height, maxVal);
+end;
+
+procedure MatrixMin(dest : PDouble; const LineWidth : NativeInt; width, height : NativeInt; minVal : double); overload;
+begin
+     assert((width >= 0) and (height >= 0) and (LineWidth >= width*sizeof(double)), 'Dimension error');
+     minMtxFunc(dest, LineWidth, width, height, minVal);
+end;
 
 function MatrixNormalize(Src : PDouble; const srcLineWidth : NativeInt; width, height : NativeInt; RowWise : boolean) : TDoubleDynArray;
 begin
@@ -1408,6 +1436,11 @@ begin
      MatrixSum(@dest[0], width*sizeof(double), @src[0], width*sizeof(double), width, height, RowWise);
 end;
 
+function MatrixSum(src : PDouble; const srcLineWidth : NativeInt; width, height : NativeInt ) : double;
+begin
+     Result := matrixSumSumFunc(src, srcLineWidth, width, height);
+end;
+
 procedure MatrixCumulativeSum(dest : PDouble; const destLineWidth : NativeInt; Src : PDouble; const srcLineWidth : NativeInt; width, height : NativeInt; RowWise : boolean);
 begin
      assert( (width > 0) and (height > 0), 'Dimension error');
@@ -1564,6 +1597,27 @@ begin
      GenericMtxFunc(dest, destLineWidth, width, height, func);
 end;
 
+procedure SubMatrixFunc(dest : PDouble; const destLineWidth : NativeInt; startx, starty, width, height : NativeInt; func : TMatrixFunc); overload;
+begin
+     GenericSubMtxFunc(dest, destLineWidth, startX, starty, width, height, func);
+end;
+
+procedure SubMatrixFunc(dest : PDouble; const destLineWidth : NativeInt; startx, starty, width, height : NativeInt; func : TMatrixObjFunc); overload;
+begin
+     GenericSubMtxFunc(dest, destLineWidth, startX, starty, width, height, func);
+end;
+
+procedure SubMatrixFunc(dest : PDouble; const destLineWidth : NativeInt; startx, starty, width, height : NativeInt; func : TMatrixMtxRefFunc); overload;
+begin
+     GenericSubMtxFunc(dest, destLineWidth, startX, starty, width, height, func);
+end;
+
+procedure SubMatrixFunc(dest : PDouble; const destLineWidth : NativeInt; startx, starty, width, height : NativeInt; func : TMatrixMtxRefObjFunc); overload;
+begin
+     GenericSubMtxFunc(dest, destLineWidth, startX, starty, width, height, func);
+end;
+
+
 {$IFDEF ANONMETHODS}
 
 procedure MatrixFunc(dest : PDouble; const destLineWidth : NativeInt; width, height : NativeInt; func : TMatrixFuncRef); overload;
@@ -1574,6 +1628,16 @@ end;
 procedure MatrixFunc(dest : PDouble; const destLineWidth : NativeInt; width, height : NativeInt; func : TMatrixMtxRefFuncRef); overload;
 begin
      GenericMtxFunc(dest, destLineWidth, width, height, func);
+end;
+
+procedure SubMatrixFunc(dest : PDouble; const destLineWidth : NativeInt; startx, starty, width, height : NativeInt; func : TMatrixFuncRef); overload;
+begin
+     GenericSubMtxFunc(dest, destLineWidth, startx, starty, width, height, func);
+end;
+
+procedure SubMatrixFunc(dest : PDouble; const destLineWidth : NativeInt; startx, starty, width, height : NativeInt; func : TMatrixMtxRefFuncRef); overload;
+begin
+     GenericSubMtxFunc(dest, destLineWidth, startx, starty, width, height, func);
 end;
 
 {$ENDIF}
@@ -1660,6 +1724,9 @@ begin
      matrixMedianFunc := GenericMtxMedian;
      matrixSortFunc := GenericMtxSort;
      colSwapFunc := GenericColSwap;
+     matrixSumSumFunc := GenericMtxSumSum;
+     maxMtxFunc := GenericMtxMaxVal;
+     minMtxFunc := GenericMtxMinVal;
 
      {$IFDEF MRMATH_NOASM}
      TDynamicTimeWarp.UseSSE := False;
@@ -1726,7 +1793,10 @@ begin
           elemAddFunc := AVXMatrixElemAdd;
           MatrixVecDotMultFunc := AVXMatrixVecDotMult;
           SymRank2UpdateFunc := AVXSymRank2UpdateUpper;
-
+          matrixSumSumFunc := AVXMatrixSumSum;
+          maxMtxFunc := AVXMatrixMax;
+          minMtxFunc := AVXMatrixMin;
+          initfunc := AVXMatrixInit;
 
           // ##############################################
           // #### override if fma is requested

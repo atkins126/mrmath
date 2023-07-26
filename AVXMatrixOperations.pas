@@ -61,8 +61,11 @@ procedure AVXMatrixScaleAndAdd(Dest : PDouble; LineWidth, Width, Height : Native
 procedure AVXMatrixSQRT(Dest : PDouble; LineWidth : NativeInt; Width, Height : NativeInt);
 procedure AVXMatrixAbs(Dest : PDouble; LineWidth : NativeInt; Width, Height : NativeInt);
 
-function AVXMatrixMax(mt : PDouble; width, height : NativeInt; const LineWidth : NativeInt) : double;
-function AVXMatrixMin(mt : PDouble; width, height : NativeInt; const LineWidth : NativeInt) : double;
+function AVXMatrixMax(mt : PDouble; width, height : NativeInt; const LineWidth : NativeInt) : double; overload;
+function AVXMatrixMin(mt : PDouble; width, height : NativeInt; const LineWidth : NativeInt) : double; overload;
+procedure AVXMatrixMin(dest : PDouble; const LineWidth : NativeInt; width, height : NativeInt; minVal : double); overload;
+procedure AVXMatrixMax(dest : PDouble; const LineWidth : NativeInt; width, height : NativeInt; maxVal : double); overload;
+function AVXMatrixSumSum(src : PDouble; srcLineWidth : NativeInt; Width, Height : NativeInt): double;
 
 procedure AVXMatrixTranspose(dest : PDouble; const destLineWidth : NativeInt; mt : PDouble; const LineWidth : NativeInt; width : NativeInt; height : NativeInt);
 function AVXMatrixElementwiseNorm2(dest : PDouble; LineWidth : NativeInt; Width, height : NativeInt; doSqrt : boolean) : double;
@@ -70,7 +73,7 @@ procedure AVXMatrixNormalize(dest : PDouble; destLineWidth : NativeInt; Src : PD
 procedure AVXMatrixMean(dest : PDouble; destLineWidth : NativeInt; Src : PDouble; srcLineWidth : NativeInt; width, height : NativeInt; RowWise : boolean);
 procedure AVXMatrixVar(dest : PDouble; destLineWidth : NativeInt; Src : PDouble; srcLineWidth : NativeInt; width, height : NativeInt; RowWise : boolean; unbiased : boolean);
 procedure AVXMatrixMeanVar(dest : PDouble; destLineWidth : NativeInt; Src : PDouble; srcLineWidth : NativeInt; width, height : NativeInt; RowWise : boolean; unbiased : boolean);
-procedure AVXMatrixSum(dest : PDouble; destLineWidth : NativeInt; Src : PDouble; srcLineWidth : NativeInt; width, height : NativeInt; RowWise : boolean);
+procedure AVXMatrixSum(dest : PDouble; destLineWidth : NativeInt; Src : PDouble; srcLineWidth : NativeInt; width, height : NativeInt; RowWise : boolean); overload;
 procedure AVXMatrixCumulativeSum(dest : PDouble; destLineWidth : NativeInt; Src : PDouble; srcLineWidth : NativeInt; width, height : NativeInt; RowWise : boolean);
 procedure AVXMatrixDifferentiate(dest : PDouble; destLineWidth : NativeInt; Src : PDouble; srcLineWidth : NativeInt; width, height : NativeInt; RowWise : boolean);
 
@@ -432,6 +435,46 @@ begin
          Result := AVXMatrixMinUnAligned(mt, width, height, LineWidth);
 end;
 
+procedure AVXMatrixMin(dest : PDouble; const LineWidth : NativeInt; width, height : NativeInt; minVal : double);
+begin
+     if (width = 0) or (height = 0) then
+        exit;
+     assert((width*sizeof(double) <= LineWidth), 'Dimension error');
+
+     if (NativeUint(dest) and $0000001F = 0) and (LineWidth and $0000001F = 0)
+     then
+         AVXMatrixMinValAligned(dest, lineWidth, width, height, minVal)
+     else
+         AVXMatrixMinValUnAligned(dest, LineWidth, width, height, minVal);
+end;
+
+procedure AVXMatrixMax(dest : PDouble; const LineWidth : NativeInt; width, height : NativeInt; maxVal : double);
+begin
+     if (width = 0) or (height = 0) then
+        exit;
+     assert((width*sizeof(double) <= LineWidth), 'Dimension error');
+
+     if (NativeUint(dest) and $0000001F = 0) and (LineWidth and $0000001F = 0)
+     then
+         AVXMatrixMaxValAligned(dest, lineWidth, width, height, maxVal)
+     else
+         AVXMatrixMaxValUnAligned(dest, LineWidth, width, height, maxVal);
+end;
+
+function AVXMatrixSumSum(src : PDouble; srcLineWidth : NativeInt; Width, Height : NativeInt): double;
+begin
+     Result := 0;
+     if (width = 0) or (height = 0) then
+        exit;
+     assert((width*sizeof(double) <= srcLineWidth), 'Dimension error');
+
+     if (NativeUint(src) and $0000001F = 0) and (srcLineWidth and $0000001F = 0)
+     then
+         Result := AVXMatrixSumAligned(src, srcLineWidth, width, height)
+     else
+         Result := AVXMatrixSumUnAligned(src, srcLineWidth, width, height);
+end;
+
 procedure AVXMatrixTranspose(dest : PDouble; const destLineWidth : NativeInt; mt : PDouble; const LineWidth : NativeInt; width : NativeInt; height : NativeInt);
 begin
      if (width = 0) or (height = 0) then
@@ -761,9 +804,9 @@ begin
      assert((width1 = width2), 'Dimension error');
      assert((destLineWidth - height2*sizeof(double) >= 0) and (LineWidth1 >= width1*sizeof(double)) and (LineWidth2 >= width2*sizeof(double)), 'Line widths do not match');
 
-     if (width1 < 3) and (width2 < 3)
+     if (width1 = 2)
      then
-         GenericMtxMultTransp(dest, destLineWidth, mt1, mt2, width1, height1, width2, height2, LineWidth1, LineWidth2)
+         ASMMatrixMultTransposed(dest, destLineWidth, mt1, mt2, width1, height1, width2, height2, LineWidth1, LineWidth2)
      else if (width1 < 2) or (width2 < 2) then
      begin
           // matrix/vector multiplication
