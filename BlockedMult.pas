@@ -1150,7 +1150,7 @@ begin
           exit;
      end;
 
-     if thrIdx = numThr - 1 then
+     if (thrIdx = numThr - 1) or (offset + thrHeight > blkHeight) then
         thrHeight := blkHeight - offset;
 
      thrCopyBlk := GenPtr(copyBlk, 0, offset, blockLineSize);
@@ -1195,7 +1195,7 @@ begin
           exit;
      end;
 
-     if thrIdx = numThr - 1 then
+     if (thrIdx = numThr - 1) or (offset + thrHeight > blkHeight) then
         thrHeight := blkHeight - offset;
 
      thrCopyBlk := GenPtr(copyBlk, 0, offset, blockLineSize);
@@ -1233,7 +1233,7 @@ begin
           exit;
      end;
 
-     if thrIdx = numThr - 1 then
+     if (thrIdx = numThr - 1) or (offset + thrblkHeight > blkHeight) then
         thrblkHeight := blkHeight - offset;
 
      thrDest := GenPtr(pDest, 0, offset, destLineWidth);
@@ -1263,7 +1263,7 @@ begin
           exit;
      end;
 
-     if thrIdx = numThr - 1 then
+     if (thrIdx = numThr - 1) or (offset + thrblkHeight > blkHeight) then
         thrblkHeight := blkHeight - offset;
 
      thrDest := GenPtr(pDest, 0, offset, destLineWidth);
@@ -1324,7 +1324,7 @@ end;
 function UseInnerBlockMult( w, h : NativeInt) : boolean;
 begin
      // not always in hyperthreading cpu's
-     Result := (numCPUCores = numRealCores) or ( (w < 1024) and (h < 1024) and (w > BlockedMatrixMultSize) and (h > BlockedMatrixMultSize) );
+     Result := ( (w < 1024) and (h < 1024) and (w > BlockedMatrixMultSize) and (h > BlockedMatrixMultSize) );
 end;
 
 procedure ThrBlockMatrixMultiplicationT2(dest : PDouble; const destLineWidth : NativeInt; mt1, mt2 : PDouble; width1 : NativeInt; height1 : NativeInt; width2 : NativeInt; height2 : NativeInt;
@@ -1712,7 +1712,7 @@ begin
           exit;
      end;
 
-     if thrIdx = numThr - 1 then
+     if (thrIdx = numThr - 1) or  (offset + thrWidth > blkWidth) then
         thrWidth := blkWidth - offset;
 
      thrTransBlk := GenPtr(transBlk, 0, offset, blockLineSize);

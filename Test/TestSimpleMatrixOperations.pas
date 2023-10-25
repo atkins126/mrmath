@@ -1814,6 +1814,8 @@ var a : Array[0..cMtxWidth*cMtxWidth - 1] of double;
     c1, c2, c3 : Array[0..cMtxWidth*cMtxWidth2-1] of double;
 begin
      {$IFDEF FMX} Setup; {$ENDIF}
+     InitMtxThreadPool;
+
      for counter := 0 to High(a) do
          a[counter] := counter;
      for counter := 0 to High(b) do
@@ -1846,6 +1848,7 @@ var aMt1, aMt2 : PDouble;
     isSame : boolean;
     errOccured : boolean;
 begin
+     InitMtxThreadPool;
      errOccured := False;
      for i := 0 to Length(cMtxWidth) - 1 do
      begin
@@ -1861,7 +1864,7 @@ begin
           end1 := MtxGetTime;
 
           start2 := MtxGetTime;
-          ThrMatrixMultT2Ex(aDest2, aDestLineWidth2, aMt1, aMt2, cMtxWidth[i], cMtxHeight[i], cMtxWidth[i], cMtxHeight[i],
+          ThrMatrixMultT2Ex2(aDest2, aDestLineWidth2, aMt1, aMt2, cMtxWidth[i], cMtxHeight[i], cMtxWidth[i], cMtxHeight[i],
                             aMt1LineWidth, aMt2LineWidth, BlockMatrixCacheSize, doNone, nil);
           end2 := MtxGetTime;
 
@@ -1901,6 +1904,8 @@ var aMt1, aMt2 : PDouble;
     isSame : boolean;
     errOccured : boolean;
 begin
+     InitMtxThreadPool;
+
      errOccured := False;
      for i := 0 to Length(cMtxWidth) - 1 do
      begin
@@ -1916,7 +1921,7 @@ begin
           end1 := MtxGetTime;
 
           start2 := MtxGetTime;
-          ThrMatrixMultEx(aDest2, aDestLineWidth2, aMt1, aMt2, cMtxWidth[i], cMtxHeight[i], cMtxHeight[i], cMtxWidth[i],
+          ThrMatrixMultEx2(aDest2, aDestLineWidth2, aMt1, aMt2, cMtxWidth[i], cMtxHeight[i], cMtxHeight[i], cMtxWidth[i],
                             aMt1LineWidth, aMt2LineWidth, BlockMatrixCacheSize, doNone, nil);
           end2 := MtxGetTime;
 
@@ -1957,6 +1962,7 @@ var a : TDoubleDynArray;
     pA, pB : PConstDoubleArr;
 begin
      {$IFDEF FMX} Setup; {$ENDIF}
+     InitMtxThreadPool;
      SetLength(a, cMtxWidth*cMtxWidth2);
      SetLength(b, cMtxWidth*cMtxWidth2);
      SetLength(c1, cMtxWidth*cMtxWidth2);
@@ -1973,7 +1979,7 @@ begin
      ThrMatrixMultT2Ex(@c2[0], cMtxWidth2*sizeof(double), @a[0], @b[0], cMtxWidth, cMtxWidth, cMtxWidth, cMtxWidth2, cMtxWidth*sizeof(double), cMtxWidth*sizeof(double), 4, doNone, nil);
 
      Check(CheckMtx(c3, c1), 'GenericBlockedMatrixMultiplicationT1 failed');
-     Check(CheckMtx(c3, c2), 'ThrMatrixMultT1Ex failed');
+     Check(CheckMtx(c3, c2), 'ThrMatrixMultT2Ex failed');
 
      // test aligned
      AllocAlignedMtx(cMtxWidth, cMtxWidth2, aa, aamem, aaLineWidth);
@@ -2080,6 +2086,7 @@ const cMtxWidth = 1000;
       cMtxLinewidth = (cMtxWidth)*sizeof(double);
 begin
      {$IFDEF FMX} Setup; {$ENDIF}
+     InitMtxThreadPool;
      randomize;
      FillMatrix(cMtxSize, x, y, xa, ya);
      SetLength(dest1, cMtxSize);
@@ -2141,6 +2148,7 @@ const //cMtxWidth = 10*cCacheMtxSize;
       cMtxLineWidth2 = cMtxHeight*8;
 begin
      {$IFDEF FMX} Setup; {$ENDIF}
+     InitMtxThreadPool;
      randomize;
      FillMatrix(cMtxSize, x, y, xa, ya);
      SetLength(dest1, cMtxHeight*cMtxHeight);
@@ -2153,7 +2161,7 @@ begin
      endTime1 := MtxGetTime;
 
      startTime2 := MtxGetTime;
-     ThrMatrixMult(dest1a, cMtxLineWidth2, xa, ya, cMtxWidth, cMtxheight, cMtxHeight, cMtxWidth, cMtxLinewidth, cMtxLinewidth2);
+     ThrMatrixMultEx2(dest1a, cMtxLineWidth2, xa, ya, cMtxWidth, cMtxheight, cMtxHeight, cMtxWidth, cMtxLinewidth, cMtxLinewidth2, BlockedMatrixMultSize, doNone, nil);
      endTime2 := MtxGetTime;
 
      startTime3 := MtxGetTime;
@@ -2828,6 +2836,7 @@ var x : Array of double;
     endTime2: Int64;
     startTime3: Int64;
     endTime3: Int64;
+    i : Integer;
     mtx : Array[0..15] of double;
 const cMtxWidth = 2000;
       cMtxHeight = 500;
@@ -2865,6 +2874,10 @@ begin
 
      Check(CheckMtxVal( x, 2.2), 'Failed to init');
 
+
+     ASMMatrixInit( xa, 16*SizeOf(double), 16, 16, 0.9);
+     for i := 0 to 16*16 - 1 do
+         check(SameValue(PConstDoubleArr(xa)^[i], 0.9), 'Init Failed' );
 
      startTime3 := MtxGetTime;
      ASMMatrixInit( xa, cMtxWidth*sizeof(double), cMtxWidth, cMtxHeight, 2.4 );
