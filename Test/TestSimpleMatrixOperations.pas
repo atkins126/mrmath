@@ -70,6 +70,7 @@ type
     procedure TestMultASMOddW1EvenH2Transposed;
     procedure TestMultASMOddW1OddH2Transposed;
     procedure TestMtxMeanRow;
+    procedure TestMtxMeanRow2;
     procedure TestMtxMeanColumn;
     procedure TestMtxSumColumn;
     procedure TestMtxSumRow;
@@ -77,6 +78,7 @@ type
     procedure TestMtxDifferentiate;
     procedure TestMinMaxASM;
     procedure TestAbsMinMaxASM;
+    procedure TestVecMinMaxASM;
     procedure TestMatrixBigASMMinMax;
     procedure TestMatrixBigASMAbsMinMax;
     procedure TestMultASM;
@@ -129,6 +131,7 @@ type
     procedure TestSQRT;
     procedure TestVecDistABS;
     procedure TestVecDistSQR;
+    procedure TestRowSwap;
   end;
 
   {$IFDEF FMX} [TestFixture] {$ENDIF}
@@ -153,9 +156,9 @@ uses ASMMatrixOperations, AVXMatrixOperations, ThreadedMatrixOperations, MtxThre
      ASMMatrixMultOperationsx64, ASMMatrixVectorMultOperationsx64, ASMMatrixMultTransposedOperationsx64,
      ASMMatrixTransposeOperationsx64, ASMMatrixNormOperationsx64, ASMMatrixCumSumDiffOperationsx64,
      ASMMatrixMeanOperationsx64, ASMMatrixSumOperationsx64, ASMMatrixAddSubOperationsx64, ASMMoveOperationsx64,
-     ASMVecDistx64,
+     ASMVecDistx64, ASMMatrixMinMaxOperationsx64,
      {$ELSE}
-     ASMMatrixAddSubOperations,
+     ASMMatrixAddSubOperations, ASMMatrixMinMaxOperations,
      ASMMatrixMultOperations, ASMMatrixVectorMultOperations, ASMMatrixMultTransposedOperations,
      ASMMatrixTransposeOperations, ASMMatrixNormOperations, ASMMatrixCumSumDiffOperations,
      ASMMatrixMeanOperations, ASMMatrixSumOperations, ASMMoveOperations, ASMVecDist,
@@ -1850,7 +1853,10 @@ var aMt1, aMt2 : PDouble;
     i : Integer;
     isSame : boolean;
     errOccured : boolean;
+    numOrigCores : integer;
 begin
+     numOrigCores := numUseCPUCores;
+
      InitMtxThreadPool;
      errOccured := False;
      for i := 0 to Length(cMtxWidth) - 1 do
@@ -1863,7 +1869,7 @@ begin
 
           start1 := MtxGetTime;
           ThrBlockMatrixMultiplicationT2(aDest1, aDestLineWidth1, aMt1, aMt2, cMtxWidth[i], cMtxHeight[i], cMtxWidth[i], cMtxHeight[i],
-                                         aMt1LineWidth, aMt2LineWidth, BlockMatrixCacheSize, doNone, nil);
+                                         aMt1LineWidth, aMt2LineWidth, 5*BlockMatrixCacheSize, doNone, nil);
           end1 := MtxGetTime;
 
           start2 := MtxGetTime;
@@ -1885,6 +1891,7 @@ begin
           FreeMem(aMem4);
      end;
 
+     numUseCPUCores := numOrigCores;
      Check(not errOccured, 'Problem with threaded matrix multiplication');
 end;
 
@@ -3429,6 +3436,33 @@ begin
      FreeMem(blk);
 end;
 
+procedure TASMMatrixOperations.TestMtxMeanRow2;
+var mt1 : Array[0..99] of double;
+    mean2,
+    mean1 : Array[0..1] of double;
+    tmp3 : double;
+    i: Integer;
+begin
+     tmp3 := -1;
+     for i := 0 to High(mean1) do
+     begin
+          mean1[i] := 0;
+          mean2[i] := 0;
+     end;
+
+     for i := 0 to High(mt1) do
+         mt1[i] := i;
+
+     GenericMtxMean(@mean1[0], sizeof(double), @mt1[0], 50*sizeof(double), 50, 2, True);
+     //ASMMatrixMeanRowAlignedEvenW(@mean2[0], sizeof(double), @mt1[0], 50*sizeof(double), 50, 2);
+     ASMMatrixMean(@mean2[0], sizeof(double), @mt1[0], 50*sizeof(double), 50, 2, true);
+
+
+     Check( SameValue(mean1[0], mean2[0]), 'Row mean failed');
+     Check( SameValue(mean1[1], mean2[1]), 'Row mean failed');
+     check( tmp3 = -1, 'WTF');
+end;
+
 procedure TASMMatrixOperations.TestMtxMeanColumn;
 const mt1 : Array[0..15] of double = (28, 35, 42, 36, 50, 67, 84, 61, 72, 99, 126, 86, 94, 128, 162, 120);
 var dest1, dest2 : Array[0..3] of double;
@@ -4220,6 +4254,83 @@ begin
      end;
 end;
 
+procedure TASMMatrixOperations.TestVecMinMaxASM;
+var x, y, y1, y2 : TDoubleDynArray;
+    idx : integer;
+    testIdx: Integer;
+
+    pM1, pM2 : PByte;
+    pX1, pY1 : PDouble;
+
+const cMinMaxLen = 1024;
+      cVecTestLen : Array[0..10] of integer = (1, 2, 3, 4, 5, 7, 16, 32, 77, 511, 1024);
+begin
+     SetLength(x, cMinMaxLen);
+     SetLength(y, cMinMaxLen);
+     SetLength(y1, cMinMaxLen);
+     SetLength(y2, cMinMaxLen);
+
+     for idx := 0 to cMinMaxLen - 1 do
+     begin
+          x[idx] := Random(1025);
+          y[idx] := Random(1025);
+     end;
+
+     for testIdx := 0 to High(cVecTestLen) do
+     begin
+          Move( y[0], y1[0], cvectestLen[testIdx]*sizeof(double));
+          Move( y[0], y2[0], cvectestLen[testIdx]*sizeof(double));
+
+          GenericVecMin(@y1[0], @x[0], cvectestLen[testIdx] );
+          ASMVecMinUnaligned(@y2[0], @x[0], cvectestLen[testIdx] );
+
+          Check( CheckMtx(y1, y2), 'Vector element min failed on ' + IntToStr( cVecTestLen[testIdx] ) );
+     end;
+
+     for testIdx := 0 to High(cVecTestLen) do
+     begin
+          Move( y[0], y1[0], cvectestLen[testIdx]*sizeof(double));
+          Move( y[0], y2[0], cvectestLen[testIdx]*sizeof(double));
+
+          GenericVecMax(@y1[0], @x[0], cvectestLen[testIdx] );
+          ASMVecMaxUnaligned(@y2[0], @x[0], cvectestLen[testIdx] );
+
+          Check( CheckMtx(y1, y2), 'Vector element max failed on ' + IntToStr( cVecTestLen[testIdx] ) );
+     end;
+
+     AllocAlignedMtx(cMinMaxLen, pY1, pM1);
+     AllocAlignedMtx(cMinMaxLen, px1, pM2);
+
+     Move( x[0], pX1^, Length(x)*sizeof(double));
+
+     FillChar(y1[0], sizeof(double)*length(y1), 0);
+
+     for testIdx := 0 to High(cVecTestLen) do
+     begin
+          Move( y[0], y1[0], cvectestLen[testIdx]*sizeof(double));
+          Move( y[0], pY1^, cvectestLen[testIdx]*sizeof(double));
+
+          GenericVecMin(@y1[0], @x[0], cvectestLen[testIdx] );
+          ASMVecMinAligned(pY1, pX1, cvectestLen[testIdx] );
+
+          Check( CheckMtxIdx( @y1[0], pY1, cvectestLen[testIdx], idx), 'Vector element min failed on ' + IntToStr( cVecTestLen[testIdx] ) );
+     end;
+
+     for testIdx := 0 to High(cVecTestLen) do
+     begin
+          Move( y[0], y1[0], cvectestLen[testIdx]*sizeof(double));
+          Move( y[0], pY1^, cvectestLen[testIdx]*sizeof(double));
+
+          GenericVecMax(@y1[0], @x[0], cvectestLen[testIdx] );
+          ASMVecMaxAligned(pY1, pX1, cvectestLen[testIdx] );
+
+          Check( CheckMtxIdx( @y1[0], pY1, cvectestLen[testIdx], idx), 'Vector element max failed on ' + IntToStr( cVecTestLen[testIdx] ) );
+     end;
+
+     FreeMem(pM1);
+     FreeMem(pM2);
+end;
+
 procedure TASMMatrixOperations.TestStrassenMult;
 var x, y : TDoubleDynArray;
     i : integer;
@@ -4514,6 +4625,22 @@ begin
      // #### Do the assembler version:
      ASMSymRank2UpdateUpper(@C1[0], cN*sizeof(double), @A[0], ck*sizeof(double), @B[0], ck*sizeof(Double), cN, ck);
      Check(CheckMtx( C, C1 ),  'Error Asm Sym Rank2 update failed' );
+end;
+
+procedure TASMMatrixOperations.TestRowSwap;
+var m : IMatrix;
+    c1, c2 : PDouble;
+begin
+     m := TDoubleMatrix.CreateRand(5, 5);
+
+     Status(WriteMtx(m.GetObjRef));
+     c1 := m.StartElement;
+     c2 := c1;   // points to the first element
+     inc(c2, 4); // points to the last element
+     MatrixColSwap(c1, c2, m.LineWidth, 5);
+     m.SetSubMatrix(0, 0, 4, 5); // hide last column
+
+     Status(WriteMtx(m.GetObjRef));
 end;
 
 procedure TASMMatrixOperations.TestBigRank2Upd;

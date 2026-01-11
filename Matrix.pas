@@ -85,6 +85,9 @@ type
     procedure SetColumn(col : integer; Values : TDoubleMatrix; ValCols : integer = 0); overload;
     procedure SetColumn(col : integer; Values : IMatrix; ValCols : integer = 0); overload;
 
+    procedure SwapRow( idx1, idx2 : integer );
+    procedure SwapColumn( idx1, idx2 : integer );
+
     procedure SetValue(const initVal : double); overload;
     procedure SetValue(const initVal : double; x, y, aWidth, aHeight : NativeInt); overload;  // sets the value in a subsection of the matrix
     procedure InitRandom(method : TRandomAlgorithm; seed : LongInt);         // sets the matrix to random values between 0 - 1
@@ -265,9 +268,9 @@ type
     function SymEig(out EigVals : TDoubleMatrix) : TEigenvalueConvergence; overload;
     function SymEig(out EigVals : IMatrix; out EigVect : IMatrix) : TEigenvalueConvergence; overload;
     function SymEig(out EigVals : IMatrix) : TEigenvalueConvergence; overload;
-    function Eig(out EigVals : TDoubleMatrix; out EigVect : TDoubleMatrix; normEigVecs : boolean = False)  : TEigenvalueConvergence; overload;
+    function Eig(out EigVals : TDoubleMatrix; out EigVect : TDoubleMatrix; normEigVecs : TEigenvalueEivecNormalize = enNone)  : TEigenvalueConvergence; overload;
     function Eig(out EigVals : TDoubleMatrix)  : TEigenvalueConvergence; overload;
-    function Eig(out EigVals : IMatrix; out EigVect : IMatrix; normEigVecs : boolean = False) : TEigenvalueConvergence; overload;
+    function Eig(out EigVals : IMatrix; out EigVect : IMatrix; normEigVecs : TEigenvalueEivecNormalize = enNone) : TEigenvalueConvergence; overload;
     function Eig(out EigVals : IMatrix)  : TEigenvalueConvergence; overload;
     function Cholesky(out Chol : TDoubleMatrix) : TCholeskyResult; overload;
     function Cholesky(out Chol : IMatrix) : TCholeskyResult; overload;
@@ -397,6 +400,9 @@ type
     procedure SetColumn(col : integer; const Values : Array of Double); overload;
     procedure SetColumn(col : integer; Values : TDoubleMatrix; ValCols : integer = 0); overload;
     procedure SetColumn(col : integer; Values : IMatrix; ValCols : integer = 0); overload;
+
+    procedure SwapRow( idx1, idx2 : integer );
+    procedure SwapColumn( idx1, idx2 : integer );
 
     procedure SetValue(const initVal : double); overload;
     procedure SetValue(const initVal : double; x, y, aWidth, aHeight : NativeInt); overload;  // sets the value in a subsection of the matrix
@@ -575,9 +581,9 @@ type
     function SymEig(out EigVals : TDoubleMatrix) : TEigenvalueConvergence; overload; virtual;
     function SymEig(out EigVals : IMatrix; out EigVect : IMatrix) : TEigenvalueConvergence; overload;
     function SymEig(out EigVals : IMatrix) : TEigenvalueConvergence; overload;
-    function Eig(out EigVals : TDoublematrix; out EigVect : TDoubleMatrix; normEigVecs : boolean = False)  : TEigenvalueConvergence; overload;
+    function Eig(out EigVals : TDoublematrix; out EigVect : TDoubleMatrix; normEigVecs : TEigenvalueEivecNormalize = enNone)  : TEigenvalueConvergence; overload;
     function Eig(out EigVals : TDoublematrix)  : TEigenvalueConvergence; overload;
-    function Eig(out EigVals : IMatrix; out EigVect : IMatrix; normEigVecs : boolean = False) : TEigenvalueConvergence; overload;
+    function Eig(out EigVals : IMatrix; out EigVect : IMatrix; normEigVecs : TEigenvalueEivecNormalize = enNone) : TEigenvalueConvergence; overload;
     function Eig(out EigVals : IMatrix)  : TEigenvalueConvergence; overload;
     function Cholesky(out Chol : TDoubleMatrix) : TCholeskyResult; overload; virtual;
     function Cholesky(out Chol : IMatrix) : TCholeskyResult; overload;
@@ -1390,7 +1396,7 @@ begin
      MatrixSQRT(StartElement, LineWidth, fSubWidth, fSubHeight);
 end;
 
-function TDoubleMatrix.Eig(out EigVals, EigVect: IMatrix; normEigVecs : boolean = False): TEigenvalueConvergence;
+function TDoubleMatrix.Eig(out EigVals, EigVect: IMatrix; normEigVecs : TEigenvalueEivecNormalize = enNone): TEigenvalueConvergence;
 var outEigVals, outEigVect : TDoubleMatrix;
 begin
      Result := Eig(outEigVals, outEigVect, normEigVecs);
@@ -1434,7 +1440,7 @@ begin
          dt.Free;
 end;
 
-function TDoubleMatrix.Eig(out EigVals, EigVect: TDoubleMatrix; normEigVecs : boolean = False): TEigenvalueConvergence;
+function TDoubleMatrix.Eig(out EigVals, EigVect: TDoubleMatrix; normEigVecs : TEigenvalueEivecNormalize = enNone): TEigenvalueConvergence;
 var dt : TDoubleMatrix;
     vecs : TDoubleMatrix;
     pReal, pImag : PDouble;
@@ -1453,14 +1459,14 @@ begin
         inc(pImag);
 
         vecs := ResultClass.Create(fSubWidth, fSubHeight);
-        
+
         // create a copy since the original content is destroyed!
-        dummy := TDoubleMatrix.Create;
+        dummy := TDoubleMatrix.Create(self.Width, self.Height, True);
         try
            dummy.Assign(self);
            Result := MatrixUnsymEigVecInPlace(dummy.StartElement, dummy.LineWidth,
-                                              fSubWidth, 
-                                              pReal, dt.LineWidth, pImag, dt.LineWidth, 
+                                              fSubWidth,
+                                              pReal, dt.LineWidth, pImag, dt.LineWidth,
                                               vecs.StartElement, vecs.LineWidth);
         finally
                dummy.Free;
@@ -1468,8 +1474,8 @@ begin
 
         if Result = qlOk then
         begin
-             if normEigVecs then
-                MatrixNormEivecInPlace(vecs.StartElement, vecs.LineWidth, fSubWidth, pImag, dt.LineWidth);
+             if normEigVecs <> enNone then
+                MatrixNormEivecInPlace(vecs.StartElement, vecs.LineWidth, fSubWidth, pImag, dt.LineWidth, normEigVecs = enLen);
              
              EigVals := dt;
              EigVect := vecs;
@@ -1764,18 +1770,13 @@ function TDoubleMatrix.Mean(RowWise: boolean): TDoubleMatrix;
 begin
      CheckAndRaiseError((Width > 0) and (Height > 0), 'No data assigned');
 
-     if RowWise then
-     begin
-          Result := ResultClass.Create(1, fSubHeight);
-
-          MatrixMean(Result.StartElement, Result.LineWidth, StartElement, LineWidth, fSubWidth, fSubHeight, RowWise);
-     end
+     if RowWise
+     then
+         Result := ResultClass.Create(1, fSubHeight)
      else
-     begin
-          Result := ResultClass.Create(fSubWidth, 1);
+         Result := ResultClass.Create(fSubWidth, 1);
 
-          MatrixMean(Result.StartElement, Result.LineWidth, StartElement, LineWidth, fSubWidth, fSubHeight, RowWise);
-     end;
+     MatrixMean(Result.StartElement, Result.LineWidth, StartElement, LineWidth, fSubWidth, fSubHeight, RowWise);
 end;
 
 procedure TDoubleMatrix.MeanInPlace(RowWise: boolean);
@@ -2882,6 +2883,32 @@ begin
      U := uObj;
      V := vObj;
      W := wObj;
+end;
+
+procedure TDoubleMatrix.SwapColumn(idx1, idx2: integer);
+begin
+     CheckAndRaiseError((idx1 >= 0) and (idx1 < Width), 'Dimension error');
+     CheckAndRaiseError((idx2 >= 0) and (idx2 < Width), 'Dimension error');
+
+     if idx1 <> idx2 then
+        MatrixColSwap( GenPtr( StartElement, idx1, 0, LineWidth ),
+                       GenPtr( StartElement, idx2, 0, LineWidth ),
+                       LineWidth,
+                       Height
+                     );
+
+end;
+
+procedure TDoubleMatrix.SwapRow(idx1, idx2: integer);
+begin
+     CheckAndRaiseError((idx1 >= 0) and (idx1 < Height), 'Dimension error');
+     CheckAndRaiseError((idx2 >= 0) and (idx2 < Height), 'Dimension error');
+
+     if idx1 <> idx2 then
+        MatrixRowSwap( GenPtr( StartElement, 0, idx1, LineWidth ),
+                       GenPtr( StartElement, 0, idx2, LineWidth ),
+                       Width
+                     );
 end;
 
 function TDoubleMatrix.SVD(out U, V, W: TDoubleMatrix; onlyDiagElements : boolean): TSVDResult;

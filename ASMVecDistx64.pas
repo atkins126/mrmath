@@ -32,7 +32,7 @@ implementation
 procedure ASMMtxDistanceSqr(dist : PDouble; LineWidthDist : NativeInt; X, Y : PDouble; {$ifdef UNIX}unixxLen{$ELSE}
   xLen {$ENDIF}, {$ifdef UNIX}unixyLen{$ELSE}yLen{$ENDIF} : NativeInt); {$IFDEF FPC} assembler; {$ENDIF}
 {$ifdef UNIX}
-var xLen, yLen : NativeInt
+var xLen, yLen : NativeInt;
 {$ENDIF}
 // rcx: dest, rdx: destlinewidth; r8: x; r9 : y
 asm
@@ -96,10 +96,11 @@ end;
 
 const cLocSignBits : Array[0..1] of int64 = ($7FFFFFFFFFFFFFFF, $7FFFFFFFFFFFFFFF);
 
-procedure ASMMtxDistanceAbs(dist : PDouble; LineWidthDist : NativeInt; X, Y : PDouble; xLen, yLen : NativeInt); {$IFDEF FPC} assembler; {$ELSE} register; {$ENDIF}
+procedure ASMMtxDistanceAbs(dist : PDouble; LineWidthDist : NativeInt; X, Y : PDouble;
+  {$ifdef UNIX}unixxLen{$ELSE}xLen {$ENDIF}, {$ifdef UNIX}unixyLen{$ELSE}yLen{$ENDIF} : NativeInt); {$IFDEF FPC} assembler; {$ENDIF}
 
 {$ifdef UNIX}
-var xLen, yLen : NativeInt
+var xLen, yLen : NativeInt;
 {$ENDIF}
 // rcx: dest, rdx: destlinewidth; r8: x; r9 : y
 asm

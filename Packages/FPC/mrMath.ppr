@@ -24,6 +24,7 @@ uses
   {$IFDEF LINUX} cthreads, {$ENDIF}
   MatrixConst in '..\..\MatrixConst.pas',
   SimpleMatrixOperations in '..\..\SimpleMatrixOperations.pas',
+  CplxSimpleMatrixOperations in '..\..\CplxSimpleMatrixOperations.pas',
 
 // ###########################################
 // #### Assembler only routines
@@ -102,6 +103,7 @@ uses
   FMAMatrixOperations in '..\..\FMAMatrixOperations.pas',
   FMAMatrixVectorMultOperations in '..\..\FMAMatrixVectorMultOperations.pas',
   FMAMatrixVectorMultOperationsx64 in '..\..\FMAMatrixVectorMultOperationsx64.pas',
+  ASMVecDist in '..\..\ASMVecDist.pas',
   ASMVecConvolve in '..\..\ASMVecConvolve.pas',
   ASMVecConvolvex64 in '..\..\ASMVecConvolvex64.pas',
   AVXVecConvolve in '..\..\AVXVecConvolve.pas',
@@ -161,6 +163,7 @@ uses
   SSA in '..\..\SSA.pas',
   MtxUtilFunc in '..\..\MtxUtilFunc.pas',
   RollingMedMean in '..\..\RollingMedMean.pas',
+  SpatialTrees in '..\SpatialTrees.pas',
   Wavelets in '..\..\Wavelets.pas';
 
 begin

@@ -50,6 +50,38 @@ Andrea Mauri - pointing out a few issues with FPC and conditional compilation an
 // ###################################################################
 changelog:
 
+date: 10.01.2026
+* Added Vantage points trees and KD trees in a new unit
+* Moved the already existing implementation of VP trees from tsne to the unit.
+
+date: 23.05.2025
+* just added row and col swap routines in the matrix class
+
+date 14.04.2025
+* Started a unit for complex number operations
+* New code to detect performance and efficiency cores
+
+date 22.01.2025
+* Added some example projects (TSNE, EM, SPLINE, REGRESSION)
+* Some minor fixes to let tsne compile for MacOS (Thanks to Andrea Mauri)
+
+date 29.12.2024
+* Speed updates for Barnes Hut -> some tree functions are now in assembler
+* Minor changes - e.g. changed the algorithm for calculating the mean sum to be more like sse style
+
+Date 20.12.2024
+* Barnes Hut Tree implementation of TSNE
+* Heap structure class
+* Pointer based Kth largest
+
+Date 21.10.2024
+* DTW revisited: introduced some ASM functions to speedup up to a factor 4.
+* Fixed a problem in correlation - the input variables were not initialized
+  and could result in NAN.
+* Introduced a few new ASM functions for min/max operations (SSE only)
+* Minor updates to CPU intruction set check - the AVX512 flag was not correctly
+  updated in x64
+
 Date 04.07.2024
 * Added Wavelets (discrete and continuous)
 * Fixed problems in the convolution functions

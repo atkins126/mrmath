@@ -123,6 +123,10 @@ function GenericMtxAbsMin(mt : PDouble; width, height : NativeInt; const LineWid
 procedure GenericMtxMaxVal(dest : PDouble; const LineWidth : NativeInt; width, height : NativeInt; maxVal : double);
 procedure GenericMtxMinVal(dest : PDouble; const LineWidth : NativeInt; width, height : NativeInt; minVal : double);
 
+// applies dest[i] := min(dest[i], mt[i])
+procedure GenericVecMin( dest : PDouble; mt : PDouble; n : NativeInt );
+procedure GenericVecMax( dest : PDouble; mt : PDouble; n : NativeInt );
+
 // matrix max and min of an upper or lower diagonal matrix
 function GenericMtxMaxUpper( mt : PDouble; N : NativeInt; const LineWidth : NativeInt ) : double;
 function GenericMtxMinUpper( mt : PDouble; N : NativeInt; const LineWidth : NativeInt ) : double;
@@ -293,7 +297,7 @@ uses Math, MathUtilFunc;
 procedure GenericInitMemAligned(A : PDouble; NumBytes : NativeInt; Value : double);
 var numElem : NativeInt;
     pA : PConstDoubleArr;
-    counter: Integer;
+    counter: NativeInt;
 begin
      numElem := NumBytes div sizeof(double);
      pA := PConstDoubleArr(A);
@@ -381,7 +385,7 @@ begin
 end;
 
 procedure GenericMtxMean(dest : PDouble; destLineWidth : NativeInt; Src : PDouble; srcLineWidth : NativeInt; width, height : NativeInt; RowWise : boolean);
-var val : double;
+var val, val2 : double;
     x, y : NativeInt;
     pVal1 : PByte;
     pVal2 : PConstDoubleArr;
@@ -395,10 +399,25 @@ begin
           for y := 0 to Height - 1 do
           begin
                val := 0;
+               val2 := 0;
 
+               // perform the sum via two variables -> so the
+               // sse version is actually the same and there are less numerical
+               // problems (in tsne this actually makes a difference)
                pVal2 := PConstDoubleArr(pVal1);
-               for x := 0 to Width - 1 do
-                   val := val + pVal2^[x];
+               x := 0;
+               while x < width - 1 do
+               begin
+                    val := val + pVal2^[x];
+                    val2 := val2 + pVal2^[x + 1];
+                    inc(x, 2);
+               end;
+               if x < width then
+                  val := val + pVal2^[x];
+
+               val := val + val2;
+               //for x := 0 to Width - 1 do
+               //    val := val + pVal2^[x];
 
                if Width > 0 then
                   dest^ := val/Width;
@@ -977,7 +996,7 @@ end;
 
 procedure GenericColSwap(A, B : PDouble; const LineWidthAB : NativeInt; Height : NativeInt);
 var tmp : double;
-    i : integer;
+    i : NativeInt;
 begin
      for i := 0 to Height - 1 do
      begin
@@ -1300,6 +1319,19 @@ begin
      end;
 end;
 
+procedure GenericVecMin( dest : PDouble; mt : PDouble; n : NativeInt );
+var i : NativeInt;
+begin
+     for i := 0 to n - 1 do
+         PConstDoubleArr(dest)^[i] := Min(PConstDoubleArr(dest)^[i], PConstDoubleArr(mt)^[i]);
+end;
+
+procedure GenericVecMax( dest : PDouble; mt : PDouble; n : NativeInt );
+var i : NativeInt;
+begin
+     for i := 0 to n - 1 do
+         PConstDoubleArr(dest)^[i] := Max(PConstDoubleArr(dest)^[i], PConstDoubleArr(mt)^[i]);
+end;
 
 procedure GenericMtxAdd(dest : PDouble; destLineWidth : NativeInt; mt1, mt2 : PDouble; width : NativeInt; height : NativeInt; LineWidth1, LineWidth2 : NativeInt);
 var x, y : NativeInt;
@@ -1392,8 +1424,8 @@ end;
 procedure GenericSubVec(A : PDouble; LineWidthA : NativeInt; B : PDouble; incX : NativeInt; width, Height : NativeInt; rowWise : Boolean);
 var pB, pA : PConstDoubleArr;
     pB2 : PDouble;
-    y : Integer;
-    x : Integer;
+    y : NativeInt;
+    x : NativeInt;
 begin
      assert((width > 0) and (height > 0), 'Dimension Error');
 
@@ -1457,8 +1489,8 @@ end;
 procedure GenericAddVec(A : PDouble; LineWidthA : NativeInt; B : PDouble; incX : NativeInt; width, Height : NativeInt; rowWise : Boolean);
 var pB, pA : PConstDoubleArr;
     pB2 : PDouble;
-    y : Integer;
-    x : Integer;
+    y : NativeInt;
+    x : NativeInt;
 begin
      assert((width > 0) and (height > 0), 'Dimension Error');
 
@@ -2770,9 +2802,9 @@ end;
 // W = C1*V1*T -> V1 is an upper triangular matrix with assumed unit diagonal entries. Operation on V1 transposition
 procedure GenericMtxMultTria2TUpperUnit(dest : PDouble; LineWidthDest : NativeInt; mt1 : PDouble; LineWidth1 : NativeInt; mt2 : PDouble; LineWidth2 : NativeInt;
   width1, height1, width2, height2 : NativeInt);
-var y: Integer;
-    x : Integer;
-    i : integer;
+var y: NativeInt;
+    x : NativeInt;
+    i : NativeInt;
     pDest : PConstDoubleArr;
     pMt1 : PConstDoubleArr;
     pMt2 : PConstDoubleArr;
@@ -2988,9 +3020,9 @@ end;
 // mt1 = mt1*mt2; where mt2 is an upper triangular matrix - diagonal elements are unit
 procedure GenericMtxMultRightUpperTriaUnit(mt1 : PDouble; LineWidth1 : NativeInt; mt2 : PDouble; LineWidth2 : NativeInt;
   width1, height1, width2, height2 : NativeInt);
-var y: Integer;
-    x : Integer;
-    i : integer;
+var y: NativeInt;
+    x : NativeInt;
+    i : NativeInt;
     pMt1 : PConstDoubleArr;
     pMt2 : PDouble;
     tmp : double;
@@ -3018,12 +3050,12 @@ end;
 // performs mt1 = mt1*mt2 where mt2 is an lower triangular matrix with unit elements in the diagonal
 procedure GenericMtxMultRightLowerTriaUnit( mt1 : PDouble; LineWidth1 : NativeInt; mt2 : PDouble; LineWidth2 : NativeInt;
   width1, height1, width2, height2 : NativeInt);
-var y : Integer;
-    y2 : integer;
+var y : NativeInt;
+    y2 : NativeInt;
     pMT1 : PConstDoubleArr;
     pMT2 : PDouble;
     val : double;
-    x : Integer;
+    x : NativeInt;
 begin
      assert((width1 > 0) and (height1 > 0) and (width1 = height2), 'Dimension error');
      assert(width2 = height2, 'MT2 is expected to be square');
@@ -3050,12 +3082,12 @@ end;
 // performs mt1 = mt1*mt2 where mt2 is an lower triangular matrix with non unit elements in the diagonal
 procedure GenericMtxMultRightLowerTriaNoUnit( mt1 : PDouble; LineWidth1 : NativeInt; mt2 : PDouble; LineWidth2 : NativeInt;
   width1, height1, width2, height2 : NativeInt);
-var y : Integer;
-    y2 : integer;
+var y : NativeInt;
+    y2 : NativeInt;
     pMT2 : PDouble;
     pMT1 : PConstDoubleArr;
     val : double;
-    x : Integer;
+    x : NativeInt;
 begin
      assert((width1 > 0) and (height1 > 0) and (width1 = height2), 'Dimension error');
      assert(width2 = height2, 'MT2 is expected to be square');
@@ -3164,7 +3196,7 @@ end;
 procedure GenericMtxMultLowNoTranspUnitVec( mt1 : PDouble; LineWidth1 : NativeInt; x : PDouble; IncX : NativeInt; len : NativeInt);
 var pX : PDouble;
     pMT1 : PConstDoubleArr;
-    i, j : Integer;
+    i, j : NativeInt;
     val : double;
 begin
      for i := len - 1 downto 0 do
@@ -3185,7 +3217,7 @@ end;
 procedure GenericMtxMultLowNoTranspNoUnitVec( mt1 : PDouble; LineWidth1 : NativeInt; x : PDouble; IncX : NativeInt; len : NativeInt);
 var pX : PDouble;
     pMT1 : PConstDoubleArr;
-    i, j : Integer;
+    i, j : NativeInt;
     val : double;
 begin
      for i := len - 1 downto 0 do
@@ -3206,9 +3238,9 @@ end;
 // mt1 = mt1*mt2'; where mt2 is an upper triangular matrix
 procedure GenericMtxMultRightUpperTriaNoUnitT2(mt1 : PDouble; LineWidth1 : NativeInt; mt2 : PDouble; LineWidth2 : NativeInt;
   width1, height1, width2, height2 : NativeInt);
-var y: Integer;
-    x : Integer;
-    i : integer;
+var y: NativeInt;
+    x : NativeInt;
+    i : NativeInt;
     pMt1 : PConstDoubleArr;
     pMt2 : PConstDoubleArr;
     tmp : double;
@@ -3574,7 +3606,7 @@ procedure GenericConvolveRevB(dest : PDouble; A, B : PDouble; aLen, bLen : Nativ
 var pDest : PConstDoubleArr;
     pA : PConstDoubleArr;
     pB : PConstDoubleArr;
-    i, j : integer;
+    i, j : NativeInt;
     aSum : double;
 begin
      pDest := PConstDoubleArr(dest);

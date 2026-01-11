@@ -16,7 +16,12 @@ unit tSNE;
 
 interface
 
-uses Matrix, Types, RandomEng, PCA;
+{$IFDEF FPC}{$Mode Delphi} {$modeswitch advancedrecords} {$ENDIF}
+
+
+uses Matrix, Types, RandomEng, PCA, MatrixConst;
+
+{$I 'mrMath_CPU.inc'}
 
 // ###################################################################
 // this unit is based on the matlab implementation on
@@ -53,49 +58,949 @@ type
 
     function DefInitPCA : TMatrixPCA;
 
-    procedure UpdateGains(var Value : double; const data : PDouble; LineWidth : integer; x, y : integer);
+    procedure UpdateGains(var Value : double; const data : PDouble; LineWidth : NativeInt; x, y : NativeInt);
     procedure HBetaExp( var value : double );
-    procedure EntropyFuncQ( var Value : double; const data : PDouble; LineWidth : integer; x, y : integer );
+    procedure EntropyFuncQ( var Value : double; const data : PDouble; LineWidth : NativeInt; x, y : NativeInt );
 
     function NormalizeInput( X : TDoubleMatrix ) : IMatrix;
-    function ApplyPCA( X : IMatrix ) : IMatrix;
+    function ApplyPCA( X : TDoubleMatrix ) : IMatrix;
     function PairwiseDist( X : TDoubleMatrix ) : IMatrix;
     function D2P( D : IMatrix ) : IMatrix;
-    procedure HBeta( D : IMatrix; beta : double; var H : double; var P : IMatrix );
+    function HBeta( D : IMatrix; beta : double; var H : double; var P : IMatrix ) : boolean;
     function tsne_p( P : IMatrix; numDims : integer ) : IMatrix;
     function InternalTSNE(xs: TDoubleMatrix; numDims: integer): TDoubleMatrix;
     function PairDist(Xs: TDoubleMatrix): IMatrix;
 
     function InitRand( w, h : Integer ) : IMatrix;
+
+    // ###########################################
+    // #### Burnes Hut
+  private
+    // P: sparse matrix
+    fN : integer;
+    fCols, fRows : TIntegerDynArray;
+    fP : TDoubleDynArray;
+    fTheta : double;
+    fCost : double;
+
+    fGradPosf, fGradNegf : TDoubleDynArray;
+
+    procedure CalcPerplexity(x : TDoubleMatrix; perplexity : double; K : integer );
+    procedure SymSparseMatrix;
+    function EvaluateError( pY : PConstDoubleArr; numDims : integer ) : double;
+    function InternalTSNEBarnesHut( xs : TDoubleMatrix; numDims : integer) : TDoubleMatrix;
+    procedure computeGradient( pY : PConstDoubleArr; numDims : integer;
+                               var dC: TDoubleDynArray );
+    procedure computeGradientThreaded( pY : PConstDoubleArr; numDims : integer;
+                               var dC: TDoubleDynArray );
   public
+    class var Threaded : boolean;    // set this flag for large datasets - for smaller ones the thread overhead outweighs the benefit
     property OnProgress : TTSNEProgress read fProgress write fProgress;
     property OnInitPCA : TTSNEPCAInit read fInitPCA write fInitPCA;
 
+    property Cost : double read fCost;
+
     // main function to map X to the number of desired dimensions
-    function SymTSNE(X : TDoubleMatrix; numDims : integer = 2) : TDoubleMatrix; overload;
+    function SymTSNE(X : TDoubleMatrix; theta : double = 0.5; numDims : integer = 2) : TDoubleMatrix; overload;
 
     // use this function if X has been preprocessed "outside" e.g. by applying an
     // incremental pca approach -> the algorithm starts with the pairwise distance calculation
-    function SymTSNEPreprocessed( X : TDoubleMatrix; numDims : integer = 2) : TDoubleMatrix;
+    function SymTSNEPreprocessed( X : TDoubleMatrix; theta : double = 0.5; numDims : integer = 2) : TDoubleMatrix;
 
     constructor Create( initDims : integer = 30; perplexity : integer = 30; numIter : integer = 1000;
                         distFunc : TTSNEDistFunc = dfOrig; randSeed : integer = 0; randAlgorithm : TRandomAlgorithm = raMersenneTwister);
 
     class function SymTSNE(X : TDoubleMatrix; numDims : integer;
-                           initDims : integer; perplexity : integer; numIter : integer = 1000;
+                           initDims : integer; perplexity : integer;
+                           theta : double = 0.5;
+                           numIter : integer = 1000;
                            distFunc : TTSNEDistFunc = dfOrig;
                            randSeed : integer = 0; randAlgorithm : TRandomAlgorithm = raMersenneTwister) : TDoubleMatrix; overload;
   end;
 
 implementation
 
-uses SysUtils, Math, Classes, MatrixASMStubSwitch, MatrixConst,
+uses MathUtilFunc, SysUtils, Math, Classes, MatrixASMStubSwitch,
      Dist, BlockSizeSetup, MtxThreadPool, ThreadedMatrix,
-     ThreadedMatrixOperations;
+     ThreadedMatrixOperations, SpatialTrees;
+
+// ###########################################
+// #### Helper Classes for Burnes Hut trees
+// ###########################################
+
+
+  // ###########################################
+  // #### SP tree data structures
+  // the record actually does not make a copy but points to given data
+  // structures. Data stems from the parent tree element...
+type
+  TSPTreeCell = record
+    Dimension : integer;
+    Corner : PConstDoubleArr;
+    Width : PConstDoubleArr;
+
+    procedure Init( inpDim : integer; inpCorner : PConstDoubleArr = nil; inpWidth : PConstDoubleArr = nil);
+    function GetCorner( d : integer ) : double; inline;
+    function GetWidth( d : integer ) : double; inline;
+    procedure SetCorner( d : integer; value : double );
+    procedure SetWidth( d : integer; value : double );
+
+    function Maxwidth : double; inline;
+
+    function ContainsPoint( pt : PConstDoubleArr ) : boolean;
+  end;
+  PSPTreeCell = ^TSPTreeCell;
+  TSPTreeCellArr = Array of TSPTreeCell;
+
+
+  // ###########################################
+  // #### segment-page clustering tree
+  // parallel part consists only of one entry...
+  TSPTreeNonEdgeFunc = function( data : PDouble; center : PDouble; buff : PDouble; N : integer ) : double; {$IFNDEF FPC} register; {$ENDIF}
+  TSPTree = class;
+  TSPTree = class(TObject)
+  private
+    // Fixed constants
+    const QT_NODE_CAPACITY : LongInt = 1;
+
+  private
+    fData : PConstDoubleArr;
+
+    fN : integer;
+    fD : integer;
+
+    fIsLeaf : boolean;
+    fSize : NativeInt;
+    fCumSize : NativeInt;
+
+    fWidth : TDoubleDynArray;
+    fCorner : TDoubleDynArray;
+
+    fParent : TSPTree;
+
+    // Axis-aligned bounding box stored as a center with half-dimensions to represent the boundaries of this quad tree
+    fBoundary : TSPTreeCell;
+    fCenterOfMass : TDoubleDynArray;
+    fBuff : TDoubleDynArray;
+
+    fIndex : Array[0..0 {QT_NODE_CAPACITY - 1}] of Integer;
+
+    // data provided for children
+    fChildren : Array of TSPTree;
+    fNumChildren : integer;
+    fTheta2 : double;
+    fBoundaryMaxWidth2 : double;
+
+    fChildrenBorders : TDoubleDynArray;
+    fChildrenWidths : TDoubleDynArray;
+
+    fNonEdgeForcesFunc : TSPTreeNonEdgeFunc;
+
+    procedure Fill( N : integer );
+    procedure ClearChildren;
+    procedure Subdivide;
+    procedure Init(parent : PSPTreeCell; inp_data, inp_corner, inp_width : PConstDoubleArr );
+  public
+    procedure ComputeEdgeForces( rows, cols : TIntegerDynArray; p : TDoubleDynArray; posF : TDoubleDynArray);
+    // Compute non-edge forces using Barnes-Hut algorithm
+    procedure ComputeNonEdgeForces(idx : Nativeint; negF : PConstDoubleArr; var sum_Q : double);
+    procedure InitComputeForces( theta : double );
+
+    function Insert( idx : integer ) : boolean;
+
+    constructor Create( d : integer; inpData : PConstDoubleArr; N : integer ); overload;
+    constructor Create( parent : TSPTree; d : integer; inpData : PConstDoubleArr; corner : PConstDoubleArr; widths : PConstDoubleArr); overload;
+    destructor Destroy; override;
+  end;
+
+// ###########################################
+// #### SPTREE
+// ###########################################
+
+{$REGION SPTREE}
+
+
+{ TSPTreeCell }
+
+function TSPTreeCell.ContainsPoint(pt: PConstDoubleArr): boolean;
+var i: Integer;
+begin
+     Result := True;
+
+     for i := 0 to Dimension - 1 do
+     begin
+          if (pt^[i] < Corner^[i] - width^[i]) or (pt^[i] > Corner^[i] + width^[i]) then
+             exit(False);
+
+          //if (Corner^[i] - width^[i] > pt^[i] then
+//             exit(False);
+//          if Corner^[i] + width^[i] < pt^[i] then
+//             exit(False);
+     end;
+end;
+
+function TSPTreeCell.GetCorner(d: integer): double;
+begin
+     assert( (d >= 0) and (d < Dimension), 'Index out of bounds');
+     Result := Corner^[d];
+end;
+
+function TSPTreeCell.GetWidth(d: integer): double;
+begin
+     assert( (d >= 0) and (d < Dimension), 'Index out of bounds');
+     Result := Width^[d];
+end;
+
+procedure TSPTreeCell.Init(inpDim: integer; inpCorner,
+  inpWidth: PConstDoubleArr);
+begin
+     Dimension := inpDim;
+     Corner := inpCorner;
+     Width := inpWidth;
+end;
+
+function TSPTreeCell.Maxwidth: double;
+begin
+     Result := MatrixMax( PDouble(width), Dimension, 1, Dimension*sizeof(double));
+end;
+
+procedure TSPTreeCell.SetCorner(d: integer; value: double);
+begin
+     assert( (d >= 0) and (d < Dimension), 'Index out of bounds');
+     Corner^[d] := value;
+end;
+
+procedure TSPTreeCell.SetWidth(d: integer; value: double);
+begin
+     assert( (d >= 0) and (d < Dimension), 'Index out of bounds');
+     Width^[d] := value;
+end;
+
+{$ENDREGION}
+
+// ###########################################
+// #### TSPTree
+// ###########################################
+
+{$REGION 'TSPTree'}
+
+{ TSPTree }
+
+procedure TSPTree.ClearChildren;
+var i : Integer;
+begin
+     for i := 0 to Length(fChildren) - 1 do
+         FreeAndNil(fChildren[i]);
+end;
+
+{$Region 'SPTree assembler optimized parts'}
+
+const cLocOne : double = 1;
+
+{$IFNDEF MRMATH_NOASM}
+
+{$IFDEF x64}
+
+procedure ASMComputeEdgeForceD2(data, p, posf: PDouble; rows : PInteger; {$IFDEF UNIX} unixCols: PInteger; unixN : integer {$ELSE} cols : PInteger; N : integer {$ENDIF} ); assembler;
+// rcx: data, rdx: p; r8 : posf; r9 : rows
+var dXMM5 : TXMMArr;
+    dXMM6 : TXMMArr;
+    aRdi : NativeInt;
+    aRSI : NativeInt;
+    aRBX : NativeInt;
+    aR10, aR11, aR12  : NativeInt;
+    {$IFDEF UNIX}
+    cols : PInteger;
+    N : integer;
+{$ENDIF}
+asm
+   {$IFDEF UNIX}
+   // Linux uses a diffrent ABI -> copy over the registers so they meet with winABI
+   // (note that the 5th and 6th parameter are are on the stack)
+   // The parameters are passed in the following order:
+   // RDI, RSI, RDX, RCX -> mov to RCX, RDX, R8, R9
+
+   mov cols, r8;
+   mov N, r9d;
+
+   mov r8, rdx;
+   mov r9, rcx;
+   mov rcx, rdi;
+   mov rdx, rsi;
+   {$ENDIF}
+
+
+   mov aRdi, rdi;
+   mov arsi, rsi;
+   mov arbx, rbx;
+   mov aR10, r10;
+   mov aR11, r11;
+   mov aR12, r12;
+
+   movupd dXMM5, xmm5;
+   movupd dXMM6, xmm6;
+
+   mov rax, rcx;     // rax will point to fData[idx1] - now fdata[0]
+
+   mov r10, cols;
+   movsd xmm6, [rip + cLocOne];
+
+   // rsi = rows[n];
+   mov esi, [r9];  // rows[0]
+
+   // for n := 0 to N - 1 do
+   @NLoop:
+      movupd xmm4, [rax];    // load fData[idx1 + dd]
+      add rax, 16;
+
+      movupd xmm5, [r8]; // posf[idx1]
+
+      // rsi already points to rows[n]
+      add r9, 4;
+      mov r12d, [r9];
+
+      // for i := rows[n] to rows[n+1] - 1 do
+      @rowsLoop:
+
+          // idx2 := cols[i]*fD;
+          mov ebx, [r10 + rsi*4];      // we have 32bit integers here -> ebx
+          shl ebx, 1;
+
+          // buff := fData[idx1 + dd] - fData[idx2 + dd];
+          movapd xmm0, xmm4;
+          movupd xmm1, [rcx + rbx*8];
+          subpd xmm0, xmm1;
+
+          // D := D + sqr(fBuff[dd]);
+          movapd xmm1, xmm0;
+          mulpd xmm1, xmm1;
+
+          haddpd xmm1, xmm1;
+
+          addsd xmm1, xmm6; // add one
+
+          // D := p[i]/D;
+          movsd xmm2, [rdx + rsi*8];
+          divsd xmm2, xmm1;
+
+          movddup xmm3, xmm2;
+
+          // for dd := 0 to fD - 1 do
+          //    posF[idx1 + dd] := posF[idx1 + dd] + D*fBuff[dd];
+          mulpd xmm0, xmm3;
+          addpd xmm5, xmm0;
+      inc esi;
+      cmp esi, r12d;
+      jne @rowsLoop;
+
+   movupd [r8], xmm5;
+   add r8, 16;
+   dec N;
+   jnz @NLoop;
+
+
+   movupd xmm5, dXMM5;
+   movupd xmm6, dXMM6;
+
+   mov Rdi, ardi;
+   mov rsi, arsi;
+   mov rbx, arbx;
+   mov R10, ar10;
+   mov R11, ar11;
+   mov R12, ar12;
+end;
+
+
+function ASMNonEdgeForce( data : PDouble; center : PDouble; buff : PDouble; N : integer ) : double; assembler;
+// rcx: data, rdx: center; r8 : buff; r9 : N
+asm
+   {$IFDEF UNIX}
+   // Linux uses a diffrent ABI -> copy over the registers so they meet with winABI
+   // (note that the 5th and 6th parameter are are on the stack)
+   // The parameters are passed in the following order:
+   // RDI, RSI, RDX, RCX -> mov to RCX, RDX, R8, R9
+   mov r8, rdx;
+   mov r9, rcx;
+   mov rcx, rdi;
+   mov rdx, rsi;
+   {$ENDIF}
+
+   xorpd xmm0, xmm0;
+   xor rax, rax;
+
+   sub r9, 2;
+   jl @lastElem;
+
+   @loop:
+      // data - center of mass
+      movupd xmm1, [rcx + rax];
+      movupd xmm2, [rdx + rax];
+
+      subpd xmm1, xmm2;
+
+      // fbuff
+      movupd [r8 + rax], xmm1;
+
+      // d = d + sqr(buff)
+      mulpd xmm1, xmm1;
+
+      addpd xmm0, xmm1;
+      add rax, 16;
+
+   sub r9, 2;
+   jge @loop;
+
+   @lastElem:
+
+   // r9 = 2 -> we are already at the end
+   add r9, 2;
+   jz @end;
+
+   movsd xmm1, [rcx + rax];
+   movsd xmm2, [rdx + rax];
+
+   subsd xmm1, xmm2;
+   movsd [r8 + rax], xmm1;
+
+   mulsd xmm1, xmm1;
+
+   addsd xmm0, xmm1;
+
+   @end:
+
+   // build result D -> returned in xmm0
+   haddpd xmm0, xmm0;
+end;
+
+function ASMNonEdgeForceD2( data : PDouble; center : PDouble; buff : PDouble; N : integer ) : double; assembler;
+// rcx: data, rdx: center; r8 : buff; r9 : N
+asm
+   {$IFDEF UNIX}
+   // Linux uses a diffrent ABI -> copy over the registers so they meet with winABI
+   // (note that the 5th and 6th parameter are are on the stack)
+   // The parameters are passed in the following order:
+   // RDI, RSI, RDX, RCX -> mov to RCX, RDX, R8, R9
+   mov r8, rdx;
+   mov r9, rcx;
+   mov rcx, rdi;
+   mov rdx, rsi;
+   {$ENDIF}
+
+   // data - center of mass
+   movupd xmm0, [rcx];
+   movupd xmm2, [rdx];
+
+   subpd xmm0, xmm2;
+
+   // fbuff
+   movupd [r8], xmm0;
+
+   // d = d + sqr(buff)
+   mulpd xmm0, xmm0;
+   // build result D -> returned in xmm0
+   haddpd xmm0, xmm0;
+end;
+
+
+{$ELSE}
+
+function ASMNonEdgeForce( data : PDouble; center : PDouble; buff : PDouble; N : integer ) : double; {$IFDEF FPC} assembler; {$ELSE} register; {$ENDIF}
+// eax: data, edx: center; ecx : buff;
+asm
+   push ebx;
+
+   xorpd xmm0, xmm0;
+   xor ebx, ebx;
+
+   sub N, 2;
+   jl @lastElem;
+
+   @loop:
+      // data - center of mass
+      movupd xmm1, [eax + ebx];
+      movupd xmm2, [edx + ebx];
+
+      // fbuff := data - center
+      subpd xmm1, xmm2;
+
+      // fbuff
+      movupd [ecx + ebx], xmm1;
+
+      // d = d + sqr(buff)
+      mulpd xmm1, xmm1;
+
+      addpd xmm0, xmm1;
+      add ebx, 16;
+
+   sub N, 2;
+   jge @loop;
+
+   @lastElem:
+
+   // r9 = 2 -> we are already at the end
+   add N, 2;
+   jz @end;
+
+   movsd xmm1, [eax + ebx];
+   movsd xmm2, [edx + ebx];
+
+   subsd xmm1, xmm2;
+   movsd [ecx + ebx], xmm1;
+
+   mulsd xmm1, xmm1;
+
+   addsd xmm0, xmm1;
+
+   @end:
+
+   // build result D -> returned in xmm0
+   haddpd xmm0, xmm0;
+   movsd Result, xmm0;
+   pop ebx;
+end;
+
+// special handling for a very common dimensionality: 2
+function ASMNonEdgeForceD2( data : PDouble; center : PDouble; buff : PDouble; N : integer ) : double; {$IFDEF FPC} assembler; {$ELSE} register; {$ENDIF}
+// eax: data, edx: center; ecx : buff;
+asm
+   // data - center of mass
+   movupd xmm1, [eax];
+   movupd xmm2, [edx];
+
+   // fbuff := data - center
+   subpd xmm1, xmm2;
+
+   // fbuff
+   movupd [ecx], xmm1;
+
+   // d = d + sqr(buff)
+   mulpd xmm1, xmm1;
+
+   // build result D -> returned in xmm0
+   haddpd xmm1, xmm1;
+   movsd Result, xmm1;
+end;
+
+procedure ASMComputeEdgeForceD2(data, p, posf: PDouble; rows, cols : PInteger; N : integer ); register;
+// eax : data, edx : p, ecx: posf
+var pData : PDouble;
+asm
+   push edi;
+   push esi;
+   push ebx;
+
+   mov pData, eax;
+
+   // ebx = rows[n];
+   mov ebx, rows;
+   mov esi, [ebx];
+
+   // for n := 0 to N - 1 do
+   @NLoop:
+      mov ebx, pData;
+      movupd xmm4, [ebx];    // load fData[idx1 + dd]
+      add pData, 16;
+
+      movupd xmm5, [ecx]; // posf[idx1]
+
+      // esi already points to rows[n]
+      add rows, 4;
+
+      // for i := rows[n] to rows[n+1] - 1 do
+
+      @rowsLoop:
+
+          // idx2 := cols[i]*fD;
+          mov ebx, cols;
+          mov ebx, [ebx + esi*4];
+          shl ebx, 1;
+
+          // buff := fData[idx1 + dd] - fData[idx2 + dd];
+          movapd xmm0, xmm4;
+          movupd xmm1, [eax + ebx*8];
+          subpd xmm0, xmm1;
+
+          // D := D + sqr(fBuff[dd]);
+          movapd xmm1, xmm0;
+          mulpd xmm1, xmm1;
+
+          haddpd xmm1, xmm1;
+          addsd xmm1, cLocOne; // add one
+
+
+          // D := p[i]/D;
+          movsd xmm2, [edx + esi*8];
+          divsd xmm2, xmm1;
+
+          movddup xmm3, xmm2;
+
+          // for dd := 0 to fD - 1 do
+          //    posF[idx1 + dd] := posF[idx1 + dd] + D*fBuff[dd];
+          mulpd xmm0, xmm3;
+          addpd xmm5, xmm0;
+      inc esi;
+      mov ebx, rows;
+      cmp esi, [ebx];
+      jne @rowsLoop;
+
+   movupd [ecx], xmm5;
+   add ecx, 16;
+   dec N;
+   jnz @NLoop;
+
+   pop ebx;
+   pop esi;
+   pop edi;
+end;
+
+{$ENDIF}
+{$ENDIF}
+
+// ###########################################
+// #### Pascal code
+{$IFDEF x64}
+function NonEdgeForce( data : PDouble; center : PDouble; buff : PDouble; N : integer ) : double;
+{$else}
+function NonEdgeForce( data : PDouble; center : PDouble; buff : PDouble; N : integer ) : double; {$IFNDEF FPC} register; {$ENDIF}
+{$ENDIF}
+var i : integer;
+begin
+     for i := 0 to N - 1 do
+         PConstDoubleArr(buff)^[i] := PConstDoubleArr(data)^[i] - PConstDoubleArr(center)^[i];
+     Result := 0;
+
+     for i := 0 to N - 1 do
+         Result := Result + sqr(PConstDoubleArr(buff)^[i]);
+end;
+
+{$ENDREGION}
+
+procedure TSPTree.ComputeEdgeForces(rows, cols: TIntegerDynArray;
+  p, posF: TDoubleDynArray);
+var idx1, idx2 : integer;
+    D : double;
+    n, i : integer;
+    dd : integer;
+begin
+     if {$IFDEF MRMATH_NOASM} True or {$ENDIF} (fD <> 2) then
+     begin
+          idx1 := 0;
+
+          for n := 0 to fN - 1 do
+          begin
+               for i := rows[n] to rows[n + 1] - 1 do
+               begin
+                    D := 1;
+
+                    idx2 := cols[i]*fD;
+
+                    for dd := 0 to fD - 1 do
+                        fBuff[dd] := fData[idx1 + dd] - fData[idx2 + dd];
+                    for dd := 0 to fD - 1 do
+                        D := D + sqr(fBuff[dd]);
+
+                    D := p[i]/D;
+
+                    // sum positive force
+                    for dd := 0 to fD - 1 do
+                        posF[idx1 + dd] := posF[idx1 + dd] + D*fBuff[dd];
+               end;
+
+               inc(idx1, fD);
+          end;
+     end {$IFDEF MRMATH_NOASM};{$ENDIF}
+     {$IFNDEF MRMATH_NOASM}
+     else  // dimension 2 fits in a xmm register -> use that :)
+         ASMComputeEdgeForceD2(PDouble(fData), @p[0], @posf[0], @rows[0], @cols[0], fN);
+     {$ENDIF}
+end;
+
+
+procedure TSPTree.ComputeNonEdgeForces(idx: NativeInt;
+  negF: PConstDoubleArr; var sum_Q: double);
+var D : double;
+    i : integer;
+    mult : double;
+begin
+     if (fCumSize = 0) or (fIsLeaf and (fSize = 1) and (fIndex[0] = idx)) then
+        exit;
+
+     // compute distance between point and center of mass
+     D := fNonEdgeForcesFunc(@fData[idx*fD], @fCenterOfMass[0], @fBuff[0], fD);
+
+//          ind := fD*idx;
+//          for i := 0 to fD - 1 do
+//              fBuff[i] := fData[ind + i] - fCenterOfMass[i];
+//
+//          D := 0;
+//          for i := 0 to fD - 1 do
+//              D := D + sqr(fBuff[i]);
+
+     // check if we can use this node as a "summary"
+
+//     if fIsLeaf or (maxWidth/sqrt(D) < theta) then
+     //if fIsLeaf or (sqr(fBoundary.Maxwidth) < D*sqr(theta)) then
+     if fIsLeaf or (fBoundaryMaxWidth2 < D*fTheta2)  then
+     begin
+          // compute and add t-SNE force between pont and current node
+          D := 1/(1 + D);
+          mult := fCumSize*D;
+          sum_Q := sum_Q + mult;
+          mult := mult*D;
+
+          for i := 0 to fD - 1 do
+              negF^[i] := negF^[i] + mult*fBuff[i];
+     end
+     else
+     begin
+          // recursively apply Barnes-Hut to children
+          for i := 0 to fNumChildren - 1 do
+              fChildren[i].ComputeNonEdgeForces(idx, negF, sum_Q);
+     end;
+end;
+
+constructor TSPTree.Create(parent: TSPTree; d: integer; inpData, corner,
+  widths: PConstDoubleArr);
+begin
+     fD := d;
+     Init( @parent, inpData, corner, widths);
+end;
+
+constructor TSPTree.Create(d: integer; inpData: PConstDoubleArr; N: integer);
+var minY, maxY : TDoubleDynArray;
+    i, j, k: Integer;
+    val : double;
+begin
+     fN := N;
+     fD := d;
+
+     fParent := nil;
+
+     // Compute mean, width, and heigh of current map (boundaries of SPTree)
+     SetLength(fWidth, fD);
+     SetLength(fCorner, fD);
+     SetLength(minY, fD);
+     SetLength(maxY, fD);
+
+     for i := 0 to Length(minY) - 1 do
+     begin
+          minY[i] := MaxDouble;
+          maxY[i] := -MaxDouble;
+     end;
+
+     for j := 0 to N - 1 do
+     begin
+          for k := 0 to fD - 1 do
+          begin
+               val := inpData^[j*fD + k];
+               fCorner[k] := fCorner[k] + val;
+               if minY[k] > val then
+                  minY[k] := val;
+               if maxy[k] < val then
+                  maxY[k] := val;
+
+          end;
+     end;
+
+     for k := 0 to fD - 1 do
+     begin
+          fCorner[k] := fCorner[k]/N;
+          fWidth[k] := maxY[k] - minY[k];
+          fWidth[k] := fWidth[k] + eps(fWidth[k]);
+     end;
+
+     // ###########################################
+     // #### now build the tree
+     Init(nil, inpData, @fCorner[0], @fWidth[0]);
+     Fill( fN );
+
+     inherited Create;
+end;
+
+destructor TSPTree.Destroy;
+begin
+     ClearChildren;
+
+     inherited;
+end;
+
+procedure TSPTree.Fill(N: integer);
+var i: Integer;
+begin
+     for i := 0 to N - 1 do
+         Insert( i );
+end;
+
+procedure TSPTree.Init(parent: PSPTreeCell; inp_data, inp_corner,
+  inp_width: PConstDoubleArr);
+begin
+     {$IFNDEF MRMATH_NOASM}
+     if GetCurCPUInstrType = itFPU
+     then
+         fNonEdgeForcesFunc := NonEdgeForce
+     else if fD = 2
+     then
+         fNonEdgeForcesFunc := ASMNonEdgeForceD2
+     else
+         fNonEdgeForcesFunc := ASMNonEdgeForce;
+     {$ELSE}
+     fNonEdgeForcesFunc := NonEdgeForce;
+     {$ENDIF}
+
+     fNumChildren := 1 shl fD;
+
+     fData := inp_data;
+     fIsLeaf := True;
+     fSize := 0;
+     fCumSize := 0;
+
+     fBoundary.Init( fD, inp_corner, inp_width );
+
+     ClearChildren;
+     SetLength(fChildren, fNumChildren);
+     SetLength(fCenterOfMass, fD);
+     MatrixInit(fCenterOfMass, 0);
+
+     SetLength(fBuff, fD);
+end;
+
+
+procedure TSPTree.InitComputeForces(theta: double);
+var i : integer;
+begin
+     // ###########################################
+     // #### Init everything just once
+     fTheta2 := sqr(theta);
+     fBoundaryMaxWidth2 := sqr(fBoundary.Maxwidth);
+
+     for i := 0 to fNumChildren - 1 do
+     begin
+          if fChildren[i] = nil then
+             break;
+          fChildren[i].InitComputeForces(theta);
+     end;
+end;
+
+function TSPTree.Insert(idx : integer): boolean;
+var pPoint : PConstDoubleArr;
+    mult1, mult2 : double;
+    i, n : integer;
+    dupl : boolean;
+begin
+     pPoint := @fData^[idx*fD];
+
+     if not fBoundary.ContainsPoint( pPoint ) then
+        exit(false);
+
+     // Online update of cumulative size and center-of-mass
+     inc(fCumSize);
+     mult1 := (fCumSize - 1)/fCumSize;
+     mult2 := 1/fCumSize;
+
+     for i := 0 to fD - 1 do
+         fCenterOfMass[i] := fCenterOfMass[i]*mult1;
+     for i := 0 to fD - 1 do
+         fCenterOfMass[i] := fCenterOfMass[i] + mult2*pPoint^[i];
+
+     // If there is space in this quad tree and it is a leaf, add the object here
+     if fIsLeaf and (fSize < QT_NODE_CAPACITY) then
+     begin
+          fIndex[fSize] := idx;
+          inc(fSize);
+          exit(True);
+     end;
+
+     // don't add duplicates for now (this is not very nice)
+     for n := 0 to fSize - 1 do
+     begin
+          dupl := True;
+          for i := 0 to fD - 1 do
+          begin
+               if pPoint^[i] <> fData^[ fIndex[n] * fD + i ] then
+               begin
+                    dupl := False;
+                    break;
+               end;
+          end;
+
+          if dupl then
+             exit(true);
+     end;
+
+     // subdivide the current cell
+     if fIsLeaf then
+        subdivide;
+
+     // find the place to insert
+     for i := 0 to fNumChildren - 1 do
+         if fChildren[i].Insert( idx ) then
+            exit(True);
+
+     // could not insert point -> fail here (this should not happen)
+     Result := False;
+end;
+
+procedure TSPTree.Subdivide;
+var i : Integer;
+    d : Integer;
+    aDiv : integer;
+    pWidths : PConstDoubleArr;
+    pCorners : PConstDoubleArr;
+    j : Integer;
+begin
+     SetLength( fChildrenBorders, fD*fNumChildren );
+     SetLength( fChildrenWidths, fD*fNumChildren );
+
+     pWidths := @fChildrenWidths[0];
+     pCorners := @fChildrenBorders[0];
+     for i := 0 to fNumChildren - 1 do
+     begin
+          aDiv := 1;
+          for d := 0 to fD - 1 do
+          begin
+               pWidths^[d] := 0.5*fBoundary.GetWidth(d);
+
+               if ((i div aDiv) mod 2) = 1
+               then
+                   pCorners^[d] := fBoundary.GetCorner(d) - 0.5*fBoundary.GetWidth(d)
+               else
+                   pCorners^[d] := fBoundary.GetCorner(d) + 0.5*fBoundary.GetWidth(d);
+
+               aDiv := aDiv*2;
+          end;
+
+          fChildren[i] := TSPTree.Create(self, fD, fData, pCorners, pWidths);
+
+          inc(PDouble(pCorners), fD);
+          inc(PDouble(pWidths), fD);
+     end;
+
+     // move existing points to correct children
+     for i := 0 to fSize - 1 do
+     begin
+          j := 0;
+          while (j < fNumChildren) and not fChildren[j].Insert(findex[i]) do
+                inc(j);
+
+          fIndex[i] := -1;
+     end;
+
+     // empty parent node
+     fSize := 0;
+     fIsLeaf := False;
+end;
+
+{$ENDREGION}
+
+// ###########################################
+// #### TSNE
+// ###########################################
 
 { TtSNE }
 
-constructor TtSNE.Create( initDims : integer = 30; perplexity : integer = 30; 
+{$Region 'Create/Free/Public interface'}
+
+constructor TtSNE.Create( initDims : integer = 30; perplexity : integer = 30;
    numIter : integer = 1000; distFunc : TTSNEDistFunc = dfOrig; randSeed : integer = 0;
    randAlgorithm : TRandomAlgorithm = raMersenneTwister);
 begin
@@ -111,13 +1016,14 @@ begin
 end;
 
 class function TtSNE.SymTSNE(X : TDoubleMatrix; numDims : integer;
-  initDims : integer; perplexity : integer; numIter : integer = 1000;
+  initDims : integer; perplexity : integer;
+  theta : double = 0.5; numIter : integer = 1000;
   distFunc : TTSNEDistFunc = dfOrig; randSeed : integer = 0;
   randAlgorithm : TRandomAlgorithm = raMersenneTwister) : TDoubleMatrix;
 begin
      with TtSNE.Create(initDims, perplexity, numIter, distFunc, randSeed, randAlgorithm) do
      try
-        Result := SymTSNE( X, numDims );
+        Result := SymTSNE( X, theta, numDims );
      finally
             Free;
      end;
@@ -127,29 +1033,62 @@ function TtSNE.NormalizeInput(X: TDoubleMatrix): IMatrix;
 var maxVal : double;
     meanVec : IMatrix;
 begin
-     Result := X.Add( -X.Min );
-     maxVal := Result.Max;
+     meanVec := X.Mean(False);
+     Result := X.subVec(meanVec, True);
+     maxVal := MatrixAbsMax( Result.StartElement, Result.Width, Result.Height, Result.LineWidth);
+     //maxVal := GenericMtxAbsMax( Result.StartElement, Result.Width, Result.Height, Result.LineWidth);
+
+
      if maxVal = 0 then
         raise Exception.Create('Error normalizing dataset - empty matrix');
 
      Result.ScaleInPlace(1/maxVal);
-     meanVec := Result.Mean(False);
-     Result.SubVecInPlace(meanVec, True);
 end;
 
 function TtSNE.SymTSNEPreprocessed(X: TDoubleMatrix;
-  numDims: integer): TDoubleMatrix;
+  theta : double; numDims: integer): TDoubleMatrix;
 begin
-     Result := InternalTSNE(X, numDims);
+     fTheta := theta;
+
+     if theta = 0
+     then
+         Result := InternalTSNE(X, numDims)
+     else
+         Result := InternalTSNEBarnesHut(X, numDims);
 end;
 
-function TtSNE.SymTSNE(X: TDoubleMatrix; numDims : integer = 2): TDoubleMatrix;
+function TtSNE.SymTSNE(X: TDoubleMatrix; theta : double = 0.5; numDims : integer = 2): TDoubleMatrix;
 var xs : IMatrix;
+    //tmp : double;
+    //itmp : integer;
+    //buf : TDoubleDynArray;
 begin
-     xs := NormalizeInput(X);
-     xs := ApplyPCA(xs);
+     fTheta := theta;
+     xs := ApplyPCA(X);
+     xs := NormalizeInput(xs.GetObjRef);
 
-     Result := InternalTSNE( xs.GetObjRef, numDims );
+     // output to compare with the original implementation
+     //buf := xs.SubMatrix;
+
+     //with TFileStream.Create('D:\xs.bin', fmCreate or fmOpenWrite) do
+//     try
+//        itmp := xs.Height; WriteBuffer(iTmp, sizeof(integer));
+//        itmp := xs.Width; WriteBuffer(iTmp, sizeof(integer));
+//        WriteBuffer(fTheta, sizeof(double));
+//        tmp := fPerplexity; WriteBuffer(tmp, sizeof(double));
+//        iTmp := xs.Width; WriteBuffer(iTmp, sizeof(integer));
+//        iTmp := 2000; WriteBuffer(iTmp, sizeof(integer));
+//
+//        WriteBuffer(buf[0], Length(buf)*sizeof(double));
+//     finally
+//            Free;
+//     end;
+
+     if theta = 0
+     then
+         Result := InternalTSNE( xs.GetObjRef, numDims )
+     else
+         Result := InternalTSNEBarnesHut(xs.GetObjRef, numDims);
 end;
 
 function TtSNE.InitRand(w, h: Integer): IMatrix;
@@ -180,7 +1119,7 @@ begin
      fyincs := nil;
 end;
 
-function TtSNE.ApplyPCA(X: IMatrix): IMatrix;
+function TtSNE.ApplyPCA(X: TDoubleMatrix): IMatrix;
 var aPca : TMatrixPCA;
 begin
      // apply pca and check if we can shrink it to the designated number of eigenvectors
@@ -191,6 +1130,7 @@ begin
          aPca := fInitPCA()
      else
          aPca := DefInitPCA();
+
      try
         Result := X.Transpose;
         aPca.PCA(Result.GetObjRef, fInitDims, False);
@@ -203,6 +1143,14 @@ begin
             aPca.Free;
      end;
 end;
+
+{$ENDREGION}
+
+// ###########################################
+// #### Exact version (based on matlab code)
+// ###########################################
+
+{$REGION 'Exact tsne'}
 
 function TtSNE.PairwiseDist(X: TDoubleMatrix): IMatrix;
 var sum_x : IMatrix;
@@ -225,10 +1173,10 @@ begin
      // ###########################################
      // #### Several distance measurements
      case fDistFunc of
-      dfEuclid: pDist := TDistance.EuclidPairDist(Xs);
-      dfNormEuclid: pDist := TDistance.NormEuclidPairDist(Xs);
-      dfAbs: pDist := TDistance.AbsPairDist(Xs);
-      dfMahalanobis: pDist := TDistance.MahalanobisPairDist(Xs);
+       dfEuclid: pDist := TDistance.EuclidPairDist(Xs);
+       dfNormEuclid: pDist := TDistance.NormEuclidPairDist(Xs);
+       dfAbs: pDist := TDistance.AbsPairDist(Xs);
+       dfMahalanobis: pDist := TDistance.MahalanobisPairDist(Xs);
      else
          // original implementation -> is already square form!
          Result := PairwiseDist(Xs);
@@ -297,10 +1245,15 @@ begin
           begin
                P[ii, i] := subVec.Vec[idx];
                inc(idx);
-          end;
+          end
+          else
+              P[i, i] := 1;
      end;
 end;
 
+var minVal : double;
+    x, y : integer;
+const cMinProb = 1e-30;
 begin
      numPts := d.Height;
      SetLength(beta, numPts);
@@ -322,6 +1275,7 @@ begin
 
           // get vector
           FillSubVec(subVec, D, i );
+
           HBeta( subVec, beta[i], H, thisP );
 
           // Evaluate whether the perplexity is within tolerance
@@ -349,8 +1303,9 @@ begin
                         beta[i] := (beta[i] + betamin)/2;
                end;
 
-               // Recompute the values
-               HBeta( subVec, beta[i], H, thisP );
+               // Recompute the values - returns false if thisP would be (close to) zeros
+               if not HBeta( subVec, beta[i], H, thisP ) then
+                  break;
 
                // Evaluate whether the perplexity is within tolerance
                Hdiff := H - logU;
@@ -361,10 +1316,23 @@ begin
           FillP(P, thisP, i);
      end;
 
+     // this routine has the diagonal elements at 1 and in case there are numerical instabilities
+     // these values are also 1
+     // -> set the diagonal to 0, the unstable elements to 1/100 of the minimum, at least a very low value
+     minVal := Min(cMinProb, P.Min)/100;
+
+     // diagonal - probability to self set to 0
+     for i := 0 to P.Width - 1 do
+         P[i, i] := 0;
+
+     // set elements with low numerical stability to the minimum
+     for y := 0 to P.Height - 1 do
+         for x := 0 to P.Width - 1 do
+             if P[x, y] = 1 then
+                P[x, y] := minVal;
+
      Result := P;
 end;
-
-
 
 // Function that computes the Gaussian kernel values given a vector of
 // squared Euclidean distances, and the precision of the Gaussian kernel.
@@ -378,16 +1346,28 @@ end;
 //    P = P / sumP;
 //end
 
-procedure TtSNE.HBeta(D: IMatrix; beta: double; var H : double; var P: IMatrix);
+function TtSNE.HBeta(D: IMatrix; beta: double; var H : double; var P: IMatrix) : boolean;
 var sumP : double;
     muldp : IMatrix;
 begin
      fBeta := beta;
-     P := D.ElementwiseFunc( {$IFDEF FPC}@{$ENDIF}HBetaExp );
-     sumP := (P.Sum(True) as IMatrix).Vec[0];
+     P := D.ElementwiseFunc( HBetaExp );
+     sumP := (P.Sum(True) as IMatrix).Vec[0] + MinSingle;  // barnes hut from mr maaten does this (but with mindouble)
      muldp := D.ElementWiseMult(P);
-     H := ln(sumP) + beta*(muldp.Sum(True) as IMatrix).Vec[0]/sumP;
-     P.ScaleInPlace(1/sumP);
+
+     if sumP >= 1e-13 then
+     begin
+          H := ln(sumP) + beta*(muldp.Sum(True) as IMatrix).Vec[0]/sumP;
+
+          P.ScaleInPlace(1/sumP);
+          Result := True;
+     end
+     else
+     begin
+          // beta seems to be high. So we define a probability that we can search for later
+          P.SetValue(1);
+          Result := False;
+     end;
 end;
 
 procedure TtSNE.HBetaExp(var value: double);
@@ -423,7 +1403,6 @@ var n : integer;                        // number of instances
     tmp : IMatrix;
     num : IMatrix;
     L, Q : IMatrix;
-    cost : double;
     doCancel : boolean;
     aSum : double;
     aMean : IMatrix;
@@ -461,7 +1440,7 @@ begin
      MatrixMax(P.StartElement, P.LineWidth, P.Width, P.Height, cMinDouble);
 
      PT := P.AsVector(True);
-     PT.ElementwiseFuncInPlace( {$IFDEF FPC}@{$ENDIF}EntropyFunc );
+     PT.ElementwiseFuncInPlace( EntropyFunc );
      PT.SumInPlace(True, True);
      constEntr := PT[0,0];
      P.ScaleInPlace(4);  // lie about the p-vals to find better local minima
@@ -489,8 +1468,8 @@ begin
 
      // #################################################
      // #### now iterate
-     origNumCPUCores := NumCPUCores;
-     numCPUCores := Min(numcpuCores, numDims);
+     origNumCPUCores := numUseCPUCores;
+     numUseCPUCores := Min(numUseCPUCores, numDims);
 
      for iter := 1 to fNumIter do
      begin
@@ -565,7 +1544,7 @@ begin
           //fy_grads := tmp2.Mult(ydata);
 
           // Update the solution
-          gains.ElementwiseFuncInPlace( {$ifdef FPC}@{$ENDIF}UpdateGains );
+          gains.ElementwiseFuncInPlace( UpdateGains );
 
           fyincs.ScaleInPlace(momentum);
 
@@ -591,26 +1570,35 @@ begin
           if Assigned(fProgress) and ( (iter = fNumIter) or (iter mod 10 = 0) ) then
           begin
                fQ := Q;
-               PT := P.ElementwiseFunc( {$IFDEF FPC}@{$ENDIF}EntropyFuncQ );
+               PT := P.ElementwiseFunc( EntropyFuncQ );
                PT.SumInPlace(True, True);
                PT.SumInPlace(False, True);
 
-               cost := constEntr - PT[0,0];
+               fCost := constEntr - PT[0,0];
 
                doCancel := False;
-               fProgress(Self, iter, cost, yData, doCancel);
+               fProgress(Self, iter, fcost, yData, doCancel);
 
                if doCancel then
                   break;
           end;
      end;
-     numCPUCores := origNumCPUCores;
+     numUseCPUCores := origNumCPUCores;
+
+     // final cost
+     fQ := Q;
+     PT := P.ElementwiseFunc( EntropyFuncQ );
+     PT.SumInPlace(True, True);
+     PT.SumInPlace(False, True);
+
+     fCost := constEntr - PT[0,0];
+
 
      Result := yData;
 end;
 
 procedure TtSNE.UpdateGains(var Value: double; const data: PDouble; LineWidth,
-  x, y: integer);
+  x, y: NativeInt);
 var cmp1, cmp2 : double;
 begin
      // branchless version
@@ -631,7 +1619,7 @@ begin
 end;
 
 procedure TtSNE.EntropyFuncQ(var Value: double; const data: PDouble; LineWidth,
-  x, y: integer);
+  x, y: NativeInt);
 begin
      value := Value*ln(fQ[x, y]);
 end;
@@ -640,5 +1628,590 @@ function TtSNE.DefInitPCA : TMatrixPCA;
 begin
      Result := TMatrixPCA.Create( [pcaTransposedEigVec] );
 end;
+
+{$ENDREGION}
+
+// ###########################################
+// #### Barnes Hut
+// ###########################################
+
+{$Region 'Barnes Hut implementation'}
+
+procedure TtSNE.SymSparseMatrix;
+var rowCnt : TIntegerDynArray;
+    n, m, i: Integer;
+    present : boolean;
+    numElem : integer;
+    symRow : TIntegerDynArray;
+    symCol : TIntegerDynArray;
+    symP : TDoubleDynArray;
+    offset : TIntegerDynArray;
+begin
+     SetLength(rowCnt, fN);
+     if not Assigned(rowCnt) then
+        raise Exception.Create('Memory allocation for row count failed');
+
+     for n := 0 to fN - 1 do
+     begin
+          for i := fRows[n] to fRows[n + 1] - 1 do
+          begin
+               // check if element fCols[i], n is present
+               present := False;
+               for m := fRows[fCols[i]] to fRows[fCols[i] + 1] - 1 do
+               begin
+                    if fCols[m] = n then
+                    begin
+                         present := True;
+                         break;
+                    end;
+               end;
+
+               inc(rowCnt[n]);
+               if not present then
+                  inc(rowCnt[fCols[i]]);
+          end;
+     end;
+
+     numElem := 0;
+     for n := 0 to fN - 1 do
+         inc(numElem, rowCnt[n]);
+
+     // allocate memory...
+     SetLength(symRow, fN + 1);
+     SetLength(symCol, numElem);
+     SetLength(symP, numElem);
+
+     if symP = nil then
+        raise Exception.Create('Failed to allocate memory for sym matrix');
+
+     // construct row indices for sym matrix
+     symRow[0] := 0;
+     for n := 0 to fN - 1 do
+         symRow[n + 1] := symRow[n] + rowCnt[n];
+
+     // fill the result matrix
+     SetLength(offset, fN);
+
+     if offset = nil then
+        raise Exception.Create('Failed to allocate memory');
+
+     for n := 0 to fN - 1 do
+     begin
+          for i := fRows[n] to fRows[n + 1] - 1 do
+          begin
+               // check if element (fcols[i], n) is present
+               present := False;
+
+               for m := fRows[ fCols[i] ] to fRows[ fCols[i] + 1 ] - 1 do
+               begin
+                    if fCols[m] = n then
+                    begin
+                         present := True;
+                         if n <= fCols[i] then
+                         begin
+                              symCol[symRow[n] + offset[n]] := fCols[i];
+                              symCol[symRow[fCols[i]] + offset[fCols[i]]] := n;
+                              symP[symRow[n] + offset[n]] := fP[i] + fP[m];
+                              symP[symRow[fCols[i]] + offset[fCols[i]]] := fP[i] + fP[m];
+                         end;
+                    end;
+               end;
+
+               // if (fCols[i], n) is not present, there is no addition involved
+               if not present then
+               begin
+                    symCol[symRow[n] + offset[n]] := fCols[i];
+                    symCol[symRow[fCols[i]] + offset[fCols[i]]] := n;
+                    symP[symRow[n] + offset[n]] := fP[i];
+                    symP[symRow[fCols[i]] + offset[fCols[i]]] := fP[i];
+               end;
+
+               // update offsets
+               if not present or (present and (n <= fCols[i])) then
+               begin
+                    inc(offset[n]);
+                    if fCols[i] <> n then
+                       inc(offset[ fCols[i] ]);
+               end;
+          end;
+     end;
+
+     // divide by two
+     MatrixScaleAndAdd( @symP[0], numElem*sizeof(double), numElem, 1, 0, 0.5 );
+     //GenericMtxScaleAndAdd( @symP[0], numElem*sizeof(double), numElem, 1, 0, 0.5 );
+
+     // return/store sym matrix
+     fRows := symRow;
+     fCols := symCol;
+     fP := symP;
+end;
+
+
+function TtSNE.EvaluateError(pY: PConstDoubleArr; numDims : integer): double;
+var tree : TSPTree;
+    buff : TDoubleDynArray;
+    sumQ : double;
+    i1, i2 : integer;
+    C, Q : double;
+    n, i, ii : integer;
+begin
+     SetLength(buff, numDims);
+
+     tree := TSPTree.Create(numDims, pY, fN);
+     try
+        sumQ := 0;
+        tree.InitComputeForces(fTheta);
+        for n := 0 to fN - 1 do
+            tree.ComputeNonEdgeForces(n, @buff[0], sumQ);
+
+        // Loop over all edges to compute t-SNE error
+        C := 0;
+
+        for n := 0 to fN - 1 do
+        begin
+             i1 := n*numDims;
+             for i := fRows[n] to fRows[n + 1] - 1 do
+             begin
+                  Q := 0;
+                  i2 := fCols[i]*numDims;
+
+                  for ii := 0 to numDims - 1 do
+                      buff[ii] := pY^[i1 + ii];
+                  for ii := 0 to numDims - 1 do
+                      buff[ii] := buff[ii] - pY^[i2 + ii];
+                  for ii := 0 to numDims - 1 do
+                      Q := Q + sqr(buff[ii]);
+
+                  Q := (1/(1 + Q))/sumQ;
+                  C := C + fP[i]*ln((fP[i] + MinSingle)/(Q + MinSingle));
+             end;
+        end;
+     finally
+            tree.Free;
+     end;
+
+     Result := C;
+end;
+
+function TtSNE.InternalTSNEBarnesHut(xs: TDoubleMatrix;
+  numDims: integer): TDoubleMatrix;
+var sumP : double;
+    i : Integer;
+    rand : TRandomGenerator;
+    dY, uY, gains : TDoubleDynArray;
+    iter: Integer;
+    momentum : double;
+    aMean : TDoubleDynArray;
+    yData : IMatrix;
+    pY : PConstDoubleArr;
+    doCancel : boolean;
+const cStopLyingIter = 250;
+      cMomSwitchIter = 250;
+      cFinalMomentum = 0.8;
+      cInitMomentum = 0.5;
+      cEta = 200;
+      cLieValue = 12;
+
+  procedure UpdateGainsBarnesHut( var gains : TDoubleDynArray; const dy, uY : TDoubleDynArray; N : integer);
+  var cmp1, cmp2 : double;
+      value : double;
+      i : Integer;
+  begin
+       for i := 0 to fN*numDims - 1 do
+       begin
+            // branchless version
+            cmp1 := Integer( (dy[i] > 0) = (uY[i] > 0) );
+            cmp2 := Integer(cmp1 = 0);
+            value := gains[i];
+            value := cmp1*cPhi*value + cmp2*(value + cK);
+            cmp2 := Integer(value > fMinGain);
+            cmp1 := Integer(cmp2 = 0);
+            gains[i] := cmp2*value + cmp1*fMinGain;
+            //if sign( dy[i] ) <> sign( uy[i] )
+//               then
+//                   gains[i] := gains[i] + 0.2
+//               else
+//                   gains[i] := Max(0.01, gains[i] * 0.8);
+       end;
+  end;
+begin
+     // ###########################################
+     // #### Compute input similarities for approximate t-SNE
+     if fPerplexity > xs.Height div 3 then
+        raise Exception.Create('Perplexity to high may be max ' + IntToStr( xs.Height div 3 ));
+     CalcPerplexity(xs, fPerplexity, 3*fPerplexity);
+     SymSparseMatrix;
+
+     // allocate memory
+     SetLength( dY, fN*numDims );
+     SetLength( uY, fN*numDims );
+     SetLength( gains, fN*numDims );
+
+     yData := TDoubleMatrix.Create(numDims, fN, True);
+     pY := PConstDoubleArr( yData.StartElement );
+
+     if (gains = nil) or (pY = nil) then
+        raise Exception.Create('Failed to allocate memory');
+
+     MatrixInit(gains, 1);
+
+     SetLength(fGradPosf, fN*numDims );
+     SetLength(fGradNegf, fN*numDims );
+
+     if fGradNegf = nil then
+        raise Exception.Create('Failed to allocate memory for gradient');
+
+     sumP := 0;
+     for i := 0 to fRows[fN] - 1 do
+         sumP := sumP + fP[i];
+     sumP := 1/sumP;
+     for i := 0 to fRows[fN] - 1 do
+         fP[i] := fP[i]*sumP;
+
+     // lie about the p-values
+     for i := 0 to fRows[fN] - 1 do
+         fP[i] := cLieValue*fP[i];
+
+     rand := TRandomGenerator.Create( fRandAlgorithm );
+     try
+        rand.Init(fSeed);
+
+        for i := 0 to fN*numDims - 1 do
+            pY^[i] := rand.RandGauss*0.0001;
+     finally
+            rand.Free;
+     end;
+
+     momentum := cInitMomentum;
+     SetLength(aMean, numDims);
+
+     // ###########################################
+     // #### Perform main training loop
+     for iter := 0 to fNumIter - 1 do
+     begin
+          // compute approximate gradient
+          if Threaded
+          then
+              computeGradientThreaded( pY, numDims, dY )
+          else
+              computeGradient( pY, numDims, dY );
+
+          // update gains
+          UpdateGainsBarnesHut( gains, dY, uY, fN*numDims );
+
+          // perform gradient update (with momentum and gains)
+          for i := 0 to fN*numDims - 1 do
+              uY[i] := momentum*uY[i] - cEta*dY[i]*gains[i];
+
+          MatrixAddVec(PDouble(pY), fN*NumDims*sizeof(double), @uY[0], sizeof(double), fN*numDims, 1, True);
+
+          // zero mean the result
+          MatrixMean( @aMean[0], numDims*sizeof(double), PDouble(pY), numDims*sizeof(double), numDims, fN, False );
+          MatrixSubVec(PDouble(pY), numDims*sizeof(double), @aMean[0], sizeof(double), numDims, fN, True);
+
+          // stop lying about the p-Values after a whie and switch momentum
+          if iter = cStopLyingIter then
+             MatrixScaleAndAdd( @fP[0], fRows[fN]*sizeof(double), fRows[fN], 1, 0, 1/cLieValue );
+
+          // ###########################################
+          // #### Progress
+          if Assigned(fProgress) and (iter mod 50 = 0) then
+          begin
+               fcost := EvaluateError(pY, numDims);
+               doCancel := False;
+               fProgress(Self, iter, fcost, yData, doCancel);
+
+               if doCancel then
+                  break;
+          end;
+
+          if iter = cMomSwitchIter then
+             momentum := cFinalMomentum;
+     end;
+
+     // final cost...
+     fCost := EvaluateError(pY, numDims);
+
+     // handle the reference counting - result in in the matrix class that is assigned...
+     Result := MatrixClass.Create;
+     Result.TakeOver(yData);
+end;
+
+procedure TtSNE.CalcPerplexity(x: TDoubleMatrix; perplexity: double;
+  K: integer);
+var curP : TDoubleDynArray;
+    n : integer;
+    tree : TVPTree;
+    objX : TDataPointArr;
+    found : boolean;
+    beta : double;
+    minBeta, maxBeta : double;
+    tol : double;
+    HDiff, H, sumP : double;
+    iter : integer;
+    indices : TSearchPtEntryArr;
+    m : Integer;
+   // invSumP : double;
+    ptRow : integer;
+
+  function DistFuncToTreeDistFunc( distFunc : TTSNEDistFunc ) : TSpatialTreeDistFuncType;
+  begin
+       case distFunc of
+         dfOrig,
+         dfEuclid: Result := TSpatialTreeDistFuncType.dfEuclid;
+         dfAbs: Result := TSpatialTreeDistFuncType.dfAbs;
+       else
+           raise Exception.Create('TSNE Distance function not implemented for KD-Trees - use only euclid or abs (manhattan) distance');
+       end;
+  end;
+begin
+     fN := X.Height;
+     SetLength( fRows, 1 + X.Height);
+     SetLength( fCols, X.Height*K );
+     SetLength( fP, Length(fCols) );
+     SetLength( CurP, X.Height - 1 );
+
+     if (curP = nil) or (fP = nil) then
+        raise Exception.Create('Failed to allocate memory');
+
+     fRows[0] := 0;
+
+     for n := 0 to fN - 1 do
+         fRows[n + 1] := K + fRows[n];
+
+     // ###########################################
+     // #### Build ball tree on data set
+     SetLength(objX, X.Height);
+
+     for n := 0 to Length(objX) - 1 do
+     begin
+          X.SetSubMatrix(0, n, X.Width, 1);
+          objX[n].Init( (*X.Width, *)n, X.StartElement );
+     end;
+     X.UseFullMatrix;
+     tree := TVPTree.Create(X.Width, DistFuncToTreeDistFunc( fDistFunc ), fRandAlgorithm, fSeed);
+     try
+        tree.BuildTree(objX);
+
+        // ###########################################
+        // #### Loop over all points to find nearest neighbors
+        for n := 0 to fN - 1 do
+        begin
+             // Find nearest neighbors
+             tree.Search(n, K + 1, indices);
+
+             ptRow := indices[0].pt^.Ind;
+
+             found := False;
+             beta := 1;
+             minBeta := Infinity;
+             maxBeta := Infinity;
+             tol := 1e-5;
+             sumP := 0;
+
+             // ###########################################
+             // #### Iterate until we found a good perplexity
+             iter := 0;
+             while not found and (iter < 200) do
+             begin
+                  // compute gaussian kernel row
+                  for m := 0 to K - 1 do
+                      curP[m] := exp(-beta*sqr(indices[m + 1].dist));
+
+                  // compute entropy of current row
+                  sumP := MinDouble;
+                  for m := 0 to K - 1 do
+                      sumP := sumP + curP[m];
+                  H := 0;
+                  for m := 0 to K - 1 do
+                      H := H + beta*sqr(indices[m + 1].dist)*curP[m];
+
+                  H := H/sumP + ln(sumP);
+
+                  // evaluate whether the entropy is within the tolerance level
+                  HDiff := H - ln(perplexity);
+
+                  found := abs(HDiff) < tol;
+                  if not found then
+                  begin
+                       if Hdiff > 0 then
+                       begin
+                            minBeta := beta;
+                            if IsInfinite(maxBeta)
+                            then
+                                beta := 2*beta
+                            else
+                                beta := (beta + maxBeta)/2;
+                       end
+                       else
+                       begin
+                            maxBeta := beta;
+                            if IsInfinite(minBeta)
+                            then
+                                beta := beta/2
+                            else
+                                beta := (beta + minBeta)/2;
+                       end;
+                  end;
+
+                  inc(iter);
+             end;
+
+             // ###########################################
+             // #### Row normalize current row of P and store in matrix
+             assert(sumP <> 0, 'Divide by zero in perplexity calculation');
+             MatrixScaleAndAdd( @curP[0], K*sizeof(double), K, 1, 0, 1/sumP );
+             for m := 0 to K - 1 do
+             begin
+                  fCols[fRows[ptRow] + m ] := indices[m + 1].pt^.Ind;
+                  fP[fRows[ptRow] + m] := curP[m];
+             end;
+        end;
+     finally
+            tree.Free;
+     end;
+end;
+
+procedure TtSNE.computeGradient(pY : PConstDoubleArr; numDims : integer;
+   var dC: TDoubleDynArray);
+var tree : TSPTree;
+    n : Integer;
+    sumQ : double;
+    i : integer;
+    invSumQ : double;
+begin
+     MatrixInit(fGradPosF, 0);
+     MatrixInit(fGradNegf, 0);
+
+     // compute all terms required for t-SNE gradient
+     sumQ := 0;
+     tree := TSPTree.Create( numDims, pY, fN );
+     try
+        tree.InitComputeForces(fTheta);
+
+        tree.ComputeEdgeForces(fRows, fCols, fP, fGradPosf);
+        for n := 0 to fN - 1 do
+            tree.ComputeNonEdgeForces(n, @fGradNegf[n*numDims], sumQ);
+
+        // compute final gradient
+        invSumQ := 1/sumQ;
+        for i := 0 to fN*numDims - 1 do
+            dC[i] := fGradPosf[i] - (fGradNegf[i]*invSumQ);
+     finally
+            tree.Free;
+     end;
+end;
+
+// ###########################################
+// #### Threaded compute edge version
+// ###########################################
+
+type
+  TNonEdgeCallRec = record
+    idx : integer;
+    n : integer;
+    sumQ : double;
+    tree : TSPTree;
+    gradNeg : PConstDoubleArr;
+  end;
+  PNonEdgeCallRec = ^TNonEdgeCallRec;
+
+procedure ComputeNonEdgeForceGradProc(rec : Pointer);
+var i : integer;
+begin
+     for i := PNonEdgeCallRec(rec)^.idx to PNonEdgeCallRec(rec)^.idx + PNonEdgeCallRec(rec)^.n - 1 do
+         PNonEdgeCallRec(rec)^.tree.ComputeNonEdgeForces(i,
+                    @(PNonEdgeCallRec(rec)^.gradNeg^[i*PNonEdgeCallRec(rec)^.tree.fD]),
+                    PNonEdgeCallRec(rec)^.sumQ );
+end;
+
+procedure TtSNE.computeGradientThreaded(pY: PConstDoubleArr; numDims: integer;
+  var dC: TDoubleDynArray);
+var tree : TSPTree;
+   // n : Integer;
+    sumQ : double;
+    i : integer;
+    invSumQ : double;
+    calls : IMtxAsyncCallGroup;
+    data : Array[0..cMaxNumCores-1] of TNonEdgeCallRec;
+    numCalls : integer;
+    iter : integer;
+    actIdx : integer;
+begin
+     MatrixInit(fGradPosF, 0);
+     MatrixInit(fGradNegf, 0);
+
+     // compute all terms required for t-SNE gradient
+     sumQ := 0;
+     tree := TSPTree.Create( numDims, pY, fN );
+     try
+        tree.InitComputeForces(fTheta);
+
+        numCalls := 0;
+        actIdx := 0;
+        iter := Max(80, fN div numUseCPUCores);
+        for i := 0 to numUseCPUCores - 2 do
+        begin
+             data[i].idx := actIdx;
+             data[i].n := Min( fN - actIdx, iter );
+             data[i].tree := tree;
+             data[i].sumQ := 0;
+             data[i].gradNeg := @fGradNegf[0];
+
+             inc(actIdx, data[i].n);
+             inc(numCalls);
+        end;
+
+        if actIdx < fN then
+        begin
+             data[numCalls].idx := actIdx;
+             data[numCalls].n := fN - actIdx;
+             data[numCalls].tree := tree;
+             data[numCalls].sumQ := 0;
+             data[numCalls].gradNeg := @fGradNegf[0];
+
+             inc(numCalls);
+        end;
+
+
+        calls := nil;
+        if numCalls > 1 then
+        begin
+             calls := MtxInitTaskGroup;
+
+             for i := 0 to numCalls - 2 do
+                 calls.AddTaskRec(ComputeNonEdgeForceGradProc, @data[i]);
+        end;
+
+        // the last call in the main thread:
+        ComputeNonEdgeForceGradProc(@data[numCalls - 1]);
+
+        //for n := 0 to fN - 1 do
+        //    tree.ComputeNonEdgeForces(n, @fGradNegf[n*numDims], sumQ);
+
+        tree.ComputeEdgeForces(fRows, fCols, fP, fGradPosf);
+        if calls <> nil then
+           calls.SyncAll;
+        for i := 0 to numCalls - 1 do
+            sumQ := sumQ + data[i].sumQ;
+
+        // compute final gradient
+        invSumQ := 1/sumQ;
+        for i := 0 to fN*numDims - 1 do
+            dC[i] := fGradPosf[i] - (fGradNegf[i]*invSumQ);
+     finally
+            tree.Free;
+     end;
+end;
+
+
+{$EndRegion}
+
+// ###########################################
+// #### 
+// ###########################################
+
+initialization
+  TtSNE.Threaded := False;
 
 end.
